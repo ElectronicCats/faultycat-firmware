@@ -9,9 +9,9 @@ host commands and firmware services correspond to each combination.
 | **Technique** | *How* is the fault physically induced? | **EMFI** · **Crowbar** |
 | **Mode** | *How many* shots and with what parameter strategy? | **Direct** (single shot) · **Campaign** (sweep) |
 
-You can run either technique in either mode — they compose freely.
-The TUI and CLI expose the matrix as four independent surfaces
-(`e`, `b`, `p` with `--engine emfi|crowbar`).
+You can run either technique in either mode — they compose freely
+on the wire protocol; a host tool can expose the matrix however it
+likes.
 
 ---
 
@@ -85,9 +85,6 @@ Single-shot configuration matrix (`crowbar_config_t`):
 | PIO instance / SM / IRQ | `pio0` SM 0 / IRQ 0 | `pio0` SM 1 / IRQ 1 |
 | USB CDC | CDC0 *"EMFI Control"* | CDC1 *"Crowbar Control"* |
 | Wire protocol | `services/host_proto/emfi_proto/` | `services/host_proto/crowbar_proto/` |
-| Host module | `faultycmd.protocols.emfi` | `faultycmd.protocols.crowbar` |
-| Host CLI group | `faultycmd emfi ...` | `faultycmd crowbar ...` |
-| TUI hotkey | `e` | `b` |
 | HV safety invariant | applies (100 ms charge limit) | does **not** apply |
 
 ---
@@ -111,10 +108,6 @@ for either as well.
   see §4.
 - **Wire opcodes** (per CDC):
   `0x01 PING · 0x10 CONFIGURE · 0x11 ARM · 0x12 FIRE · 0x13 DISARM · 0x14 STATUS`.
-- **Host CLI.** `faultycmd emfi {ping,configure,arm,fire,disarm,status}`
-  and the matching `faultycmd crowbar ...`.
-- **TUI.** Hotkey `e` → `EmfiControlModal`. Hotkey `b` →
-  `CrowbarControlModal`.
 
 ### 2.2 Campaign mode — sweep over a parameter grid
 
@@ -147,16 +140,11 @@ for either as well.
   **same** CDC as the engine they target — EMFI campaigns over
   CDC0, crowbar campaigns over CDC1. The engine is implied by the
   CDC plus the explicit `engine` byte in the config payload.
-- **TUI MVP.** The campaign modal is currently locked to
-  `engine=crowbar` (F11-0c). The CLI accepts either engine.
 - **Verify hook.** After every fire the executor calls a verify
   callback that acquires `swd_bus_lock(CAMPAIGN)`, runs a no-op,
   and releases. A future phase plugs a real SWD `read32` against a
   target baseline into that hook. See
   [`docs/MUTEX_INTERNALS.md`](MUTEX_INTERNALS.md).
-- **Host CLI.** `faultycmd campaign {configure,start,stop,status,
-  drain,watch}` with `--engine emfi|crowbar`.
-- **TUI.** Hotkey `p` → `CampaignControlModal`.
 
 `campaign_config_t` shape:
 
@@ -178,8 +166,6 @@ for either as well.
 | Engine bound by | which CDC the host opened | explicit `engine` byte in the config payload |
 | Result data | `STATUS` reply of the last fire | 28 B record per step, streamed via `DRAIN` |
 | Typical use | Bench tuning, single shot under a scope | Parameter-space search for an actual attack |
-| Host CLI | `faultycmd {emfi,crowbar} {arm,fire,...}` | `faultycmd campaign {configure,start,watch,...}` |
-| TUI hotkey | `e` (EMFI) / `b` (crowbar) | `p` |
 | Firmware code | `services/glitch_engine/{emfi,crowbar}/*_campaign.{c,h}` | `services/campaign_manager/` + adapters in `apps/faultycat_fw/main.c` |
 | Wire spec | `services/host_proto/{emfi,crowbar}_proto/` | `services/host_proto/campaign_proto/` |
 
@@ -192,13 +178,11 @@ falls into exactly one of these four cells:
 
 | | Direct mode (1 shot) | Campaign mode (sweep) |
 |---|---|---|
-| **EMFI** | `faultycmd emfi fire` · TUI `e` | `faultycmd campaign configure --engine emfi` · TUI `p` (CLI only in v3.0) |
-| **Crowbar** | `faultycmd crowbar fire` · TUI `b` | `faultycmd campaign configure --engine crowbar` · TUI `p` |
+| **EMFI** | single-shot opcodes `0x01..0x14` on CDC0 | campaign opcodes `0x20..0x24` on CDC0, `engine=EMFI` |
+| **Crowbar** | single-shot opcodes `0x01..0x14` on CDC1 | campaign opcodes `0x20..0x24` on CDC1, `engine=CROWBAR` |
 
 The wire protocol, the per-engine state machine, and the sweep
-manager are all **already shipped** for the full matrix; only the
-TUI campaign-modal engine selector is locked to crowbar in this
-release (F11-0c MVP — see the host README's "Status" section).
+manager are all **already shipped** for the full matrix.
 
 ---
 
@@ -220,9 +204,9 @@ different things, which is what makes this topic confusing:
    plugs into one of the per-engine state machines above as its
    step executor.
 
-To stay unambiguous this document — and the host CLI / TUI surfaces
-— use **engine state machine** for sense (1) and **campaign** for
-sense (2). A future cleanup may rename the engine state-machine
+To stay unambiguous this document uses **engine state machine** for
+sense (1) and **campaign** for sense (2). A future cleanup may
+rename the engine state-machine
 files to `*_engine.{c,h}` to align the code with the documentation;
 the wire protocols stay unchanged either way.
 
@@ -235,15 +219,12 @@ the wire protocols stay unchanged either way.
 | EMFI engine state machine | `services/glitch_engine/emfi/emfi_campaign.{c,h}` |
 | EMFI PIO program | `services/glitch_engine/emfi/emfi_pio.{c,h}` |
 | EMFI wire protocol | `services/host_proto/emfi_proto/` |
-| EMFI host CLI / module | `faultycmd emfi ...` · `host/faultycmd-py/src/faultycmd/protocols/emfi.py` |
 | Crowbar engine state machine | `services/glitch_engine/crowbar/crowbar_campaign.{c,h}` |
 | Crowbar PIO program | `services/glitch_engine/crowbar/crowbar_pio.{c,h}` |
 | Crowbar wire protocol | `services/host_proto/crowbar_proto/` |
-| Crowbar host CLI / module | `faultycmd crowbar ...` · `host/faultycmd-py/src/faultycmd/protocols/crowbar.py` |
 | Campaign sweep manager | `services/campaign_manager/` |
 | Campaign wire protocol | `services/host_proto/campaign_proto/` |
 | Campaign engine adapters | `apps/faultycat_fw/main.c::campaign_executor_emfi` / `_crowbar` |
-| Campaign host CLI / module | `faultycmd campaign ...` · `host/faultycmd-py/src/faultycmd/protocols/campaign.py` |
 
 ## 6 · Related docs
 
@@ -256,6 +237,3 @@ the wire protocols stay unchanged either way.
   hardware paths.
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) §USB composite — where
   each CDC sits in the descriptor.
-- [`host/faultycmd-py/README.md`](../host/faultycmd-py/README.md)
-  — host install / usage, hotkeys, trigger polarity, trigger
-  timeout.

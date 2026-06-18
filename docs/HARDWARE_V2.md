@@ -21,7 +21,8 @@ v2.x C firmware was removed in F11 cleanup, see commit `a42131c`):
 - `firmware/c/glitcher/glitcher.c` of the legacy v2.x firmware (for
   `GlitchOutput_{LP,HP,EMP}` → GPIO mapping, with legacy-quirk
   annotations).
-- `Hardware/FaultyCat.kicad_sch` (net labels cross-referenced).
+- The FaultyCat v2.x schematic (net labels cross-referenced; maintained
+  in the hardware repository).
 
 The live cross-reference in the v3 tree is now `drivers/include/board_v2.h`
 plus each driver's `*_init()`. The schematic stays the schematic.

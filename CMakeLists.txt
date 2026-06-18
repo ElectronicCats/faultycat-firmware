@@ -45,10 +45,8 @@ endif()
 
 project(faultycat
     # 4-segment version (MAJOR.MINOR.PATCH.TWEAK). Bumped in-place by
-    # the release workflow's `sed` step on every `vX.Y.Z.W` tag push;
-    # mirrored to host/faultycmd-py/pyproject.toml and
-    # host/faultycmd-py/src/faultycmd/__init__.py. The workflow rejects
-    # tags that don't match the 4-segment shape.
+    # the release workflow's `sed` step on every `vX.Y.Z.W` tag push.
+    # The workflow rejects tags that don't match the 4-segment shape.
     VERSION      3.0.0.5
     LANGUAGES    C CXX ASM
     DESCRIPTION  "FaultyCat v3 firmware (rewrite, runs on HW v2.x)"

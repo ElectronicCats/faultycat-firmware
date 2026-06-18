@@ -9,7 +9,6 @@
 exclude: |
   (?x)^(
     third_party/.*|
-    Hardware/.*|
     build/.*|
     .*\.uf2$|
     .*\.bin$|
@@ -31,16 +30,6 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-case-conflict
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
-    hooks:
-      - id: ruff
-        args: [--fix, --config=host/faultycmd-py/pyproject.toml]
-        files: ^host/faultycmd-py/.*\.py$
-      - id: ruff-format
-        args: [--config=host/faultycmd-py/pyproject.toml]
-        files: ^host/faultycmd-py/.*\.py$
 
   # C / C++ — RP2040 firmware (apps/ services/ drivers/ hal/ usb/ tests/).
   # Style lives in .clang-format at the repo root.

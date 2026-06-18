@@ -113,7 +113,6 @@ static void diag_banner(void) {
                 EMFI_MANUAL_WIDTH_US);
     diag_printf("                auto-disarms after fire\n");
     diag_printf(" CROWBAR      : controlled via CDC1 (crowbar_proto)\n");
-    diag_printf("                — `faultycmd crowbar ping` to verify\n");
     diag_printf(" EMFI         : controlled via CDC0 (emfi_proto)\n");
     diag_printf(" SCANNER      : line-buffered shell on this CDC (CDC2)\n");
     diag_printf("                type `?` for the command list\n");
@@ -126,7 +125,7 @@ static void diag_banner(void) {
 //
 // Tiny line-buffered text parser shared by all the v3 debug services.
 // Lets the operator drive everything from a serial terminal or from
-// `faultycmd scanner` without needing a host-side CMSIS-DAP stack
+// a host tool without needing a host-side CMSIS-DAP stack
 // (that lands in F7). The shell shares CDC2 with the
 // diag snapshot stream — outputs use a service prefix so the
 // host-side filters can demux:

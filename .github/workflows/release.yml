@@ -1,23 +1,23 @@
 name: Create Release on Tag
 
-# Mirrors the Minino release flow, adapted to the pico-sdk
-# (RP2040) toolchain and to the FaultyCat host CLI/TUI Python package.
+# Mirrors the Minino release flow, adapted to the pico-sdk (RP2040)
+# toolchain.
 #
 # Trigger: maintainer pushes a 4-segment tag `vMAJOR.MINOR.PATCH.TWEAK`
 # (with an optional `-suffix` for pre-releases). The workflow:
 #   1. Strips the `v` prefix and validates the version shape.
-#   2. Defensively rewrites the version literal in CMakeLists.txt,
-#      pyproject.toml and __init__.py (in the workflow checkout only —
-#      we do NOT commit-back, same as Minino).
-#   3. Installs the cross-compile toolchain + Python build deps.
+#   2. Defensively rewrites the version literal in CMakeLists.txt
+#      (in the workflow checkout only — we do NOT commit-back, same
+#      as Minino).
+#   3. Installs the cross-compile toolchain.
 #   4. Delegates to `scripts/get_build.sh`, which produces a single
-#      versioned directory (`faultycat-release-X.Y.Z.W/`) holding the
-#      UF2, ELF, sdist, and wheel.
+#      versioned directory (`build/apps/faultycat_fw/`) holding the
+#      UF2.
 #   5. Uploads the directory as a workflow artifact.
-#   6. Publishes a DRAFT GitHub Release with every file from the
-#      directory attached and a body that documents BOOTSEL flashing
-#      and the `pip install` command. `generateReleaseNotes: true`
-#      pulls the changelog from PRs/commits since the previous tag.
+#   6. Publishes a DRAFT GitHub Release with the UF2 attached and a
+#      body that documents BOOTSEL flashing. `generateReleaseNotes:
+#      true` pulls the changelog from PRs/commits since the previous
+#      tag.
 #
 # Tag examples: `v3.0.0.0`, `v3.1.0.0`, `v3.1.0.1`, `v3.1.0.0-rc1`.
 on:
@@ -29,8 +29,8 @@ on:
 permissions:
   contents: write
 
-# Opt JavaScript actions (checkout, setup-python, upload/download-artifact)
-# into Node.js 24 instead of the deprecated Node.js 20 runtime, so the
+# Opt JavaScript actions (checkout, upload/download-artifact) into
+# Node.js 24 instead of the deprecated Node.js 20 runtime, so the
 # release log isn't flooded with "Node.js 20 actions are deprecated"
 # warnings. Node 24 is becoming the default on June 2nd, 2026; this
 # just brings the switch forward. Drop the env once GitHub flips the
@@ -44,7 +44,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build firmware + host artifacts
+    name: Build firmware
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -66,9 +66,8 @@ jobs:
         #               project convention.
         #   VERSION   — the bare semver `3.0.0.1` (no `v`, no suffix).
         #               This is what gets seded into CMake's
-        #               `project(VERSION ...)` and pyproject.toml's
-        #               `version = "..."` — both reject the `v` and the
-        #               pre-release suffix per their grammars.
+        #               `project(VERSION ...)` — it rejects the `v`
+        #               and the pre-release suffix per its grammar.
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]]; then
@@ -89,27 +88,16 @@ jobs:
             libnewlib-arm-none-eabi \
             libstdc++-arm-none-eabi-newlib
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Python build backend
-        run: |
-          python -m pip install --upgrade pip
-          pip install build
-
       - name: Run scripts/get_build.sh
         # Same delegation pattern as Minino: the workflow installs the
         # toolchain, the script does the actual building + packaging.
-        # The script bumps the version literals in-place (CMakeLists.txt,
-        # pyproject.toml, __init__.py) so the firmware actually carries
-        # the tagged version in its `firmware_version.h` (and therefore
-        # in the PING reply, the CDC2 `version` command, and the USB
-        # bcdDevice). It then drops every release artifact in
-        # `build/apps/faultycat_fw/` — covered by `/**/build/` in
-        # .gitignore so the workflow checkout never sees these as
-        # tracked changes.
+        # The script bumps the version literal in-place (CMakeLists.txt)
+        # so the firmware actually carries the tagged version in its
+        # `firmware_version.h` (and therefore in the PING reply, the
+        # CDC2 `version` command, and the USB bcdDevice). It then drops
+        # the release artifact in `build/apps/faultycat_fw/` — covered
+        # by `/**/build/` in .gitignore so the workflow checkout never
+        # sees these as tracked changes.
         run: ./scripts/get_build.sh "${TAG}"
 
       - name: Upload release artifact
@@ -120,102 +108,9 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  build-windows-exe:
-    name: Build Windows standalone .exe (PyInstaller)
-    # Runs in parallel with the firmware build. We ship the .exe as
-    # the primary Windows install path because the pip-installed
-    # console script lands in a Scripts/ directory that is not on the
-    # default user PATH on Windows — an operator that just runs
-    # `pip install faultycmd-X.Y.Z.W-py3-none-any.whl` outside a venv
-    # ends up having to invoke `<path-to-Scripts>\faultycmd.exe`
-    # explicitly. With a PyInstaller --onefile binary, the operator
-    # drops the .exe anywhere and double-clicks / runs it directly.
-    runs-on: windows-latest
-    timeout-minutes: 25
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Extract tag + version
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]]; then
-            echo "::error::Tag '${TAG}' does not match vMAJOR.MINOR.PATCH.TWEAK[-suffix]"
-            exit 1
-          fi
-          VERSION="${TAG#v}"
-          VERSION="${VERSION%%-*}"
-          echo "TAG=${TAG}" >> $GITHUB_ENV
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-
-      - name: Bump host version literals to match tag
-        # Same sed targets as scripts/get_build.sh on the Linux side
-        # (minus CMakeLists.txt, since this job does not build the
-        # firmware). Keeps the .exe in lock-step with the wheel/sdist
-        # produced by the Linux build.
-        shell: bash
-        run: |
-          sed -i -E "s/^(version = )\"[^\"]+\"/\1\"${VERSION}\"/" \
-            host/faultycmd-py/pyproject.toml
-          sed -i -E "s/^(__version__ = )\"[^\"]+\"/\1\"${VERSION}\"/" \
-            host/faultycmd-py/src/faultycmd/__init__.py
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install package + PyInstaller
-        shell: bash
-        working-directory: host/faultycmd-py
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e '.[build-binary]'
-
-      - name: Build the standalone .exe
-        # `--onefile` keeps the artifact to a single file the user can
-        # drop anywhere; the cost is a one-time extraction-to-tempdir
-        # on first invocation, acceptable for a CLI/TUI tool.
-        # `-p src --collect-all faultycmd` is what lets the
-        # PyInstaller bootloader resolve `from faultycmd.cli import
-        # _wrap_main` inside the frozen `__main__.py` (same setup the
-        # Linux smoke build uses in host-py.yml).
-        shell: bash
-        working-directory: host/faultycmd-py
-        run: |
-          pyinstaller --name faultycmd --onefile \
-            -p src \
-            --collect-all faultycmd \
-            --collect-all textual --collect-all rich --collect-all click \
-            src/faultycmd/__main__.py
-
-      - name: Verify the .exe boots
-        shell: bash
-        run: |
-          host/faultycmd-py/dist/faultycmd.exe --version
-
-      - name: Stage .exe with v-prefixed filename
-        shell: bash
-        run: |
-          mkdir -p staging
-          cp host/faultycmd-py/dist/faultycmd.exe \
-             staging/faultycmd_${TAG}.exe
-
-      - name: Upload Windows .exe artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: faultycmd-windows-${{ env.TAG }}
-          path: staging/faultycmd_*.exe
-          retention-days: 30
-          if-no-files-found: error
-
   release:
     name: Publish draft GitHub Release
-    needs: [build, build-windows-exe]
+    needs: [build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -280,16 +175,10 @@ jobs:
             echo "HIGHLIGHTS_EOF"
           } >> $GITHUB_ENV
 
-      - name: Download firmware + host distributions
+      - name: Download firmware artifact
         uses: actions/download-artifact@v4
         with:
           name: faultycat-release-${{ env.TAG }}
-          path: ./release/
-
-      - name: Download Windows standalone .exe
-        uses: actions/download-artifact@v4
-        with:
-          name: faultycmd-windows-${{ env.TAG }}
           path: ./release/
 
       - name: List release payload
@@ -307,11 +196,7 @@ jobs:
           body: |
             # FaultyCat ${{ github.ref_name }}
 
-            Firmware (RP2040 UF2) and host CLI/TUI built from tag
-            `${{ github.ref_name }}`. The host package on this release
-            **only talks to firmware built from this same tag** —
-            re-flash the UF2 before upgrading the host package, or pass
-            `--ignore-version-mismatch` to bypass during development.
+            Firmware (RP2040 UF2) built from tag `${{ github.ref_name }}`.
 
             ## Highlights
 
@@ -326,59 +211,12 @@ jobs:
                The board reboots into the new firmware automatically
                and re-enumerates as `1209:fa17`.
 
-            Verify with:
-
-            ```bash
-            faultycmd info
-            ```
-
-            The firmware row should show `v${{ env.VERSION }} (match)`.
-
-            ## Installing the host CLI/TUI
-
-            ### Windows — standalone `.exe` (no Python install needed)
-
-            Download `faultycmd_${{ env.TAG }}.exe`, drop it
-            wherever is convenient (a folder on `PATH`, your Desktop,
-            a project directory — anywhere), and run it. The .exe
-            bundles Python and every dependency.
-
-            From the same directory the `.exe` lives in (PowerShell
-            or `cmd.exe`), the `.\` prefix is required to tell the
-            shell to run the local file instead of searching `PATH`:
-
-            ```powershell
-            .\faultycmd_${{ env.TAG }}.exe info
-            .\faultycmd_${{ env.TAG }}.exe tui
-            ```
-
-            **Easier:** rename the file to something shorter
-            (e.g. `faultycmd.exe`), and the invocations become
-
-            ```powershell
-            .\faultycmd.exe info
-            .\faultycmd.exe tui
-            ```
-
-            And if you put that renamed `faultycmd.exe` in a folder
-            that is already on your `PATH`, you can drop the `.\`
-            too and just type `faultycmd info` from anywhere.
-
-            ### Linux / macOS / Windows-with-Python — wheel or sdist
-
-            Python wheels follow PEP 440 and do NOT carry the `v` prefix:
-
-            ```bash
-            pip install faultycmd-${{ env.VERSION }}-py3-none-any.whl
-            # or, from the source tarball:
-            pip install faultycmd-${{ env.VERSION }}.tar.gz
-            ```
+            Verify the flashed version via the CDC2 diag banner or the
+            `version` shell command — it should read
+            `${{ env.VERSION }}`.
 
             ## Artifacts
 
-            | File                                              | Purpose                                          |
-            |---------------------------------------------------|--------------------------------------------------|
-            | `faultycat_${{ env.TAG }}.uf2`                    | RP2040 firmware (BOOTSEL flashable)              |
-            | `faultycmd_${{ env.TAG }}.exe`                    | Windows standalone CLI/TUI (no Python needed)    |
-            | `faultycmd-${{ env.VERSION }}-py3-none-any.whl`   | Host CLI/TUI wheel (Linux / macOS / Windows pip) |
-            | `faultycmd-${{ env.VERSION }}.tar.gz`             | Host source distribution                         |
+            | File                                | Purpose                             |
+            |--------------------------------------|--------------------------------------|
+            | `faultycat_${{ env.TAG }}.uf2`        | RP2040 firmware (BOOTSEL flashable) |
