@@ -6,7 +6,8 @@
 // services/swd_bus_lock — F9-1 mutual-exclusion wrapper over the
 // scanner-header SWD/JTAG bus shared by F6 swd_core, F8-1 jtag_core,
 // F8-2 pinout_scanner, F8-4 buspirate_compat, F9 campaign_manager,
-// and the future F7 daplink_usb. Sits at the *service* layer — F8-1's
+// services/uart_passthrough (CH0/CH1), and the future F7 daplink_usb.
+// Sits at the *service* layer — F8-1's
 // shell-level soft-lock between SWD and JTAG (in apps/faultycat_fw/
 // main.c) stays in place; this is orthogonal and covers the
 // service-to-service contention case.
@@ -32,10 +33,11 @@
 #define SWD_BUS_TIMEOUT_FOREVER 0xFFFFFFFFu
 
 typedef enum {
-    SWD_BUS_OWNER_IDLE     = 0, // bus free
-    SWD_BUS_OWNER_CAMPAIGN = 1, // glitch_engine post-fire SWD verify (F9)
-    SWD_BUS_OWNER_SCANNER  = 2, // pinout_scanner during P(8,k) sweep (F8-2)
-    SWD_BUS_OWNER_DAPLINK  = 3, // CMSIS-DAP from external host (F7)
+    SWD_BUS_OWNER_IDLE          = 0, // bus free
+    SWD_BUS_OWNER_CAMPAIGN      = 1, // glitch_engine post-fire SWD verify (F9)
+    SWD_BUS_OWNER_SCANNER       = 2, // pinout_scanner during P(8,k) sweep (F8-2)
+    SWD_BUS_OWNER_DAPLINK       = 3, // CMSIS-DAP from external host (F7)
+    SWD_BUS_OWNER_UART_PASSTHRU = 4, // services/uart_passthrough on CH0/CH1
 } swd_bus_owner_t;
 
 // Reset to IDLE state. Safe to call repeatedly.
