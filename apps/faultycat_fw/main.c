@@ -27,6 +27,7 @@
 #include "flashrom_serprog.h"
 #include "hal/gpio.h"
 #include "hal/time.h"
+#include "hal/uart.h"
 #include "hv_charger.h"
 #include "jtag_core.h"
 #include "board_v2.h"
@@ -37,6 +38,7 @@
 #include "swd_mem.h"
 #include "swd_phy.h"
 #include "target_monitor.h"
+#include "uart_passthrough.h"
 #include "firmware_version.h"
 #include "ui_buttons.h"
 #include "ui_leds.h"
@@ -188,6 +190,11 @@ static void shell_help(void) {
     shell_print("SHELL:   serprog enter [<cs> <mosi> <miso> <sck>]     flashrom serprog (F8-5)\n");
     shell_print("SHELL:                                                defaults: 0 1 2 3, exit on "
                 "host disconnect\n");
+    shell_print("SHELL: --- UART passthrough (Target UART CDC) ---\n");
+    shell_print(
+        "SHELL:   uart enter [<baud> <n|e|o> <1|2>]            CH0=TX/CH1=RX, default 115200 N1\n");
+    shell_print("SHELL:   uart baud <n> | parity <n|e|o> | stopbits <1|2>   live reconfigure\n");
+    shell_print("SHELL:   uart status | exit\n");
     shell_print("SHELL: NOTE: JTAG and direct-SWD verbs (jtag *, swd *, scan jtag) are\n");
     shell_print("SHELL:       WIP and disabled in this release — they will respond `ERR wip`.\n");
 }
@@ -746,6 +753,151 @@ static void process_serprog_subcmd(int argc, char** argv) {
 }
 
 // -----------------------------------------------------------------------------
+// uart_passthrough — CDC3 ("Target UART") ↔ scanner-header UART0
+// bridge. Unlike buspirate/serprog, control happens on CDC2's normal
+// text shell (`uart enter/baud/parity/stopbits/exit/status`) while
+// data flows separately on CDC3 — no shell-mode takeover needed.
+// -----------------------------------------------------------------------------
+
+static void uart_write_byte_cb(uint8_t b, void* u) {
+    (void)u;
+    usb_composite_cdc_write(USB_CDC_TARGET, &b, 1);
+}
+
+static const uart_passthrough_callbacks_t UART_CALLBACKS = {
+    .write_byte = uart_write_byte_cb,
+    .user       = NULL,
+};
+
+static const char* uart_parity_label(hal_uart_parity_t p) {
+    switch (p) {
+        case HAL_UART_PARITY_EVEN:
+            return "E";
+        case HAL_UART_PARITY_ODD:
+            return "O";
+        default:
+            return "N";
+    }
+}
+
+static bool uart_parse_parity(const char* s, hal_uart_parity_t* out) {
+    if (!strcmp(s, "n") || !strcmp(s, "N")) {
+        *out = HAL_UART_PARITY_NONE;
+        return true;
+    }
+    if (!strcmp(s, "e") || !strcmp(s, "E")) {
+        *out = HAL_UART_PARITY_EVEN;
+        return true;
+    }
+    if (!strcmp(s, "o") || !strcmp(s, "O")) {
+        *out = HAL_UART_PARITY_ODD;
+        return true;
+    }
+    return false;
+}
+
+static void process_uart_subcmd(int argc, char** argv) {
+    if (argc < 2) {
+        shell_print("UART: ERR uart needs subcommand (try `?`)\n");
+        return;
+    }
+    const char* sub = argv[1];
+
+    if (!strcmp(sub, "enter")) {
+        if (jtag_is_inited()) {
+            shell_print("UART: ERR jtag_in_use (run `jtag deinit` first)\n");
+            return;
+        }
+        if (swd_shell_inited) {
+            shell_print("UART: ERR swd_in_use (run `swd deinit` first)\n");
+            return;
+        }
+        hal_uart_config_t cfg = {
+            .baudrate  = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 115200u,
+            .data_bits = 8u,
+            .stop_bits = (argc >= 5) ? (uint8_t)strtoul(argv[4], NULL, 0) : 1u,
+            .parity    = HAL_UART_PARITY_NONE,
+        };
+        if (argc >= 4 && !uart_parse_parity(argv[3], &cfg.parity)) {
+            shell_print("UART: ERR usage: uart enter [<baud> <n|e|o> <1|2>]\n");
+            return;
+        }
+        if (!uart_passthrough_enable(cfg, &UART_CALLBACKS)) {
+            shell_print("UART: ERR busy (scanner-header bus held by another service)\n");
+            return;
+        }
+        shell_printf("UART: OK enabled baud=%lu parity=%s stopbits=%u on CH0(TX)/CH1(RX)\n",
+                     (unsigned long)cfg.baudrate, uart_parity_label(cfg.parity), cfg.stop_bits);
+        shell_print("UART: connect to the Target UART CDC for passthrough traffic\n");
+        return;
+    }
+    if (!strcmp(sub, "exit")) {
+        uart_passthrough_disable();
+        shell_print("UART: OK disabled\n");
+        return;
+    }
+    if (!strcmp(sub, "status")) {
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: disabled\n");
+            return;
+        }
+        hal_uart_config_t cfg = uart_passthrough_get_config();
+        shell_printf("UART: enabled baud=%lu parity=%s stopbits=%u\n", (unsigned long)cfg.baudrate,
+                     uart_parity_label(cfg.parity), cfg.stop_bits);
+        return;
+    }
+    if (!strcmp(sub, "baud")) {
+        if (argc < 3) {
+            shell_print("UART: ERR usage: uart baud <n>\n");
+            return;
+        }
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: ERR not_enabled (run `uart enter` first)\n");
+            return;
+        }
+        uart_passthrough_set_baud(strtoul(argv[2], NULL, 0));
+        shell_print("UART: OK baud updated\n");
+        return;
+    }
+    if (!strcmp(sub, "parity")) {
+        hal_uart_parity_t parity;
+        if (argc < 3 || !uart_parse_parity(argv[2], &parity)) {
+            shell_print("UART: ERR usage: uart parity <n|e|o>\n");
+            return;
+        }
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: ERR not_enabled (run `uart enter` first)\n");
+            return;
+        }
+        uart_passthrough_set_parity(parity);
+        shell_print("UART: OK parity updated\n");
+        return;
+    }
+    if (!strcmp(sub, "stopbits")) {
+        if (argc < 3) {
+            shell_print("UART: ERR usage: uart stopbits <1|2>\n");
+            return;
+        }
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: ERR not_enabled (run `uart enter` first)\n");
+            return;
+        }
+        uart_passthrough_set_stop_bits((uint8_t)strtoul(argv[2], NULL, 0));
+        shell_print("UART: OK stopbits updated\n");
+        return;
+    }
+    shell_printf("UART: ERR unknown_subcmd: %s (try `?`)\n", sub);
+}
+
+static void pump_uart_passthrough(void) {
+    if (!uart_passthrough_is_enabled())
+        return;
+    uint8_t buf[64];
+    size_t n = usb_composite_cdc_read(USB_CDC_TARGET, buf, sizeof(buf));
+    uart_passthrough_pump(buf, n);
+}
+
+// -----------------------------------------------------------------------------
 // F9-3 campaign manager — engine adapters + shell sub-shell
 //
 // Two adapter executors bridge campaign_manager's per-step API onto
@@ -1083,6 +1235,10 @@ static void process_shell_line(char* line) {
         process_serprog_subcmd(argc, argv);
         return;
     }
+    if (!strcmp(argv[0], "uart")) {
+        process_uart_subcmd(argc, argv);
+        return;
+    }
     // F11 release: the JTAG sub-shell and the direct-SWD sub-shell are
     // WIP and hidden from the public surface. The cmd_* implementations
     // + service_jtag + service_swd stay compiled in (so v3.1 can re-
@@ -1321,6 +1477,7 @@ int main(void) {
     bool last_arm             = false;
     bool last_pulse           = false;
     bool last_scanner_conn    = false;
+    bool last_target_conn     = false;
     uint32_t last_snapshot_ms = 0;
 
     while (true) {
@@ -1329,6 +1486,7 @@ int main(void) {
         pump_emfi_cdc();
         pump_crowbar_cdc();
         pump_shell_cdc();
+        pump_uart_passthrough();
         emfi_campaign_tick();
         crowbar_campaign_tick();
         campaign_manager_tick();
@@ -1352,6 +1510,16 @@ int main(void) {
             }
         }
         last_scanner_conn = conn;
+
+        // Target UART CDC disconnect (DTR drop) while passthrough is
+        // live → release the scanner-header bus the same way a
+        // crashed buspirate/serprog session is torn down above; the
+        // operator has no in-band exit byte on this raw byte pipe.
+        bool target_conn = usb_composite_cdc_connected(USB_CDC_TARGET);
+        if (last_target_conn && !target_conn && uart_passthrough_is_enabled()) {
+            uart_passthrough_disable();
+        }
+        last_target_conn = target_conn;
 
         bool arm   = ui_buttons_is_pressed(UI_BTN_ARM);
         bool pulse = ui_buttons_is_pressed(UI_BTN_PULSE);
