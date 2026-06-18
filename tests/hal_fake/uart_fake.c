@@ -16,8 +16,8 @@ void hal_fake_uart_inject_rx(const uint8_t* data, size_t len) {
 }
 
 void hal_uart_init(hal_uart_config_t cfg) {
-    hal_fake_uart_state.initialized   = true;
-    hal_fake_uart_state.last_config   = cfg;
+    hal_fake_uart_state.initialized = true;
+    hal_fake_uart_state.last_config = cfg;
     hal_fake_uart_state.init_calls++;
 }
 

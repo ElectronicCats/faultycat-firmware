@@ -242,8 +242,32 @@ Current tree health:
   `crowbar_campaign_tick` between candidates and prints
   `SCAN: progress N/total` every 100 iterations — long scans don't
   starve TinyUSB or stall an active glitch campaign.
-- **404 unit tests** across 29 binaries, all green under
+- **`services/uart_passthrough/`** complete: `uart_passthrough.{c,h}`
+  — dumb byte bridge between CDC3 ("Target UART", `USB_CDC_TARGET`,
+  reserved since F3 but unimplemented until now) and the RP2040's
+  native UART0 peripheral, fixed to scanner-header CH0 (TX) / CH1
+  (RX) — both are UART0's native pins, so no PIO bit-bang is needed.
+  Unlike `buspirate_compat`/`flashrom_serprog`, control is out-of-
+  band: CDC2's text shell stays a normal shell (no mode takeover) and
+  gains `uart enter [<baud> <n|e|o> <1|2>]` / `uart baud|parity|
+  stopbits <…>` / `uart status` / `uart exit`, while CDC3 carries only
+  raw passthrough bytes. `uart_passthrough_enable` claims a new
+  `SWD_BUS_OWNER_UART_PASSTHRU` tag on `services/swd_bus_lock` (CH0/
+  CH1 are shared with `swd_core`/`jtag_core`/`pinout_scanner`/
+  `campaign_manager`) and fails with `UART: ERR busy` if another
+  consumer holds it. `apps/faultycat_fw/main.c` pumps
+  `uart_passthrough_pump()` every main-loop tick alongside the other
+  CDC pumps, and auto-disables the session on CDC3 DTR drop (no
+  in-band exit byte exists on a raw byte pipe, so disconnect detection
+  is the only way out if the operator's terminal closes uncleanly). A
+  second passthrough pair (GP range still to be decided) is explicitly
+  out of scope for this pass.
+- **417 unit tests** across 30 binaries, all green under
   `cmake --preset host-tests && ctest --preset host-tests`.
+  `uart_passthrough` added `test_uart_passthrough` (13 — enable/
+  disable bus ownership, live reconfigure setters, byte bridging both
+  directions) plus a generic `hal_fake_uart` (TX capture + injectable
+  RX buffer).
   F8-1 added `test_jtag_core` (24 cases) plus a generic
   `hal_fake_gpio` edge sampler + per-pin input-script API;
   F8-2 added `test_pinout_scanner` (13);
@@ -318,6 +342,7 @@ compatible — existing EMFI / crowbar configures are unaffected.
 │    host_proto/emfi_proto              │    binary framing on CDC0    ✓ F4    │
 │    host_proto/crowbar_proto           │    binary framing on CDC1    ✓ F5    │
 │    host_proto/campaign_proto          │    streamed sweep results    … F9    │
+│    uart_passthrough/                  │    CDC3 <-> UART0 byte bridge ✓      │
 ├────────────────────────────────────────────────────────────────────────────┤
 │  usb/                                 ←  composite descriptor                │
 │    usb_composite.c + usb_descriptors.c + dap_stub.c              ✓ F3        │
@@ -367,7 +392,7 @@ Configuration Descriptor (Miscellaneous class, IAD-based)
 ├── IAD + CDC 0 "EMFI Control"       IF 0 (notif) + IF 1 (data)  ✓ F4 emfi_proto
 ├── IAD + CDC 1 "Crowbar Control"    IF 2 (notif) + IF 3 (data)  ✓ F5 crowbar_proto
 ├── IAD + CDC 2 "Scanner Shell"      IF 4 (notif) + IF 5 (data)  ✓ F6 swd_shell + diag (F8 → full blueTag shell)
-├── IAD + CDC 3 "Target UART"        IF 6 (notif) + IF 7 (data)  → PIO UART passthru
+├── IAD + CDC 3 "Target UART"        IF 6 (notif) + IF 7 (data)  ✓ uart_passthrough
 ├── Vendor IF   "CMSIS-DAP v2"       IF 8 (2 bulk eps)           → daplink_usb (v2)
 └── HID IF      "CMSIS-DAP v1"       IF 9 (1 int ep)             → daplink_usb (v1)
 ```
