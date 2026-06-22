@@ -579,8 +579,12 @@ static void cmd_scan_swd(int argc, char** argv) {
                  PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_SWD_PINS,
                  PINOUT_SCANNER_SWD_TOTAL);
     pinout_scan_swd_result_t r;
-    bool found = pinout_scan_swd(&r, scan_yield_progress);
-    if (!found) {
+    pinout_scan_swd_status_t status = pinout_scan_swd(&r, scan_yield_progress);
+    if (status == PINOUT_SCAN_SWD_BUS_BUSY) {
+        shell_print("SCAN: ERR bus_busy (SWD bus held by another service)\n");
+        return;
+    }
+    if (status != PINOUT_SCAN_SWD_MATCH) {
         shell_print("SCAN: swd NO_MATCH (no OK DPIDR found)\n");
         return;
     }
