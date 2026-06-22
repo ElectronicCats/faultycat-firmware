@@ -53,3 +53,24 @@ size_t hal_uart_read(uint8_t* data, size_t cap);
 
 // True if at least one byte is waiting in the RX FIFO.
 bool hal_uart_rx_available(void);
+
+// --- RX diagnostics (temporary — remove once the RX path is proven) --------
+// Snapshot of what the RP2040 UART0 RX side is actually doing, so the host
+// can tell "no byte ever reached the FIFO" from "bytes arrived but were
+// garbled" from "bytes read but never left over USB".
+typedef struct {
+    uint32_t func_tx;     // gpio_get_function(GP0) — expect 2 (GPIO_FUNC_UART)
+    uint32_t func_rx;     // gpio_get_function(GP1) — expect 2 (GPIO_FUNC_UART)
+    uint32_t rx_level;    // GP1 pad level NOW — a UART RX line MUST idle at 1
+    uint32_t tx_level;    // GP0 pad level NOW — idles at 1 too
+    uint32_t cr;          // PL011 CR — expect EN(0x1)|TXE(0x100)|RXE(0x200)=0x301
+    uint32_t lcr_h;       // PL011 LCR_H — word length / FIFO enable / parity
+    uint32_t fr;          // PL011 FR — RXFE(0x10) set when RX FIFO empty
+    uint32_t bytes_read;  // total bytes pulled out of the RX FIFO
+    uint32_t err_framing; // DR framing errors (FE) — baud/format/idle wrong
+    uint32_t err_parity;  // DR parity errors (PE)
+    uint32_t err_break;   // DR break errors (BE) — line stuck low / inverted
+    uint32_t err_overrun; // DR overrun errors (OE) — FIFO not drained fast
+} hal_uart_rx_diag_t;
+
+void hal_uart_get_rx_diag(hal_uart_rx_diag_t* out);

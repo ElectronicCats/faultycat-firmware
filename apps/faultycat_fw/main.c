@@ -759,9 +759,14 @@ static void process_serprog_subcmd(int argc, char** argv) {
 // data flows separately on CDC3 — no shell-mode takeover needed.
 // -----------------------------------------------------------------------------
 
+// --- RX diagnostics (temporary — remove once the RX path is proven) --------
+static volatile uint32_t s_dbg_fwd;     // bytes the pump handed to this cb
+static volatile uint32_t s_dbg_cdc_acc; // bytes the host CDC actually accepted
+
 static void uart_write_byte_cb(uint8_t b, void* u) {
     (void)u;
-    usb_composite_cdc_write(USB_CDC_TARGET, &b, 1);
+    s_dbg_fwd++;
+    s_dbg_cdc_acc += (uint32_t)usb_composite_cdc_write(USB_CDC_TARGET, &b, 1);
 }
 
 static const uart_passthrough_callbacks_t UART_CALLBACKS = {
@@ -890,11 +895,44 @@ static void process_uart_subcmd(int argc, char** argv) {
 }
 
 static void pump_uart_passthrough(void) {
-    if (!uart_passthrough_is_enabled())
+    bool enabled = uart_passthrough_is_enabled();
+    if (enabled) {
+        uint8_t buf[64];
+        size_t n = usb_composite_cdc_read(USB_CDC_TARGET, buf, sizeof(buf));
+        uart_passthrough_pump(buf, n);
+    }
+
+    // --- temporary RX diagnostics, dumped to CDC2 once per second ----------
+    // Heartbeat ALWAYS emits so `en=0` is visible. The bridge tears down
+    // whenever the Target CDC (CDC3) drops DTR (see the disconnect handler
+    // in the main loop), so closing the picocom on the target port disables
+    // it — you'd then see nothing here on the old build. Watch on the
+    // Scanner CDC (IF 0x04):
+    //   IN  — did the byte reach UART0's RX FIFO at all, and was it clean?
+    //         `rxpin` is the live GP1 level — a UART RX MUST idle at 1.
+    //   OUT — did we forward it and did CDC3 (Target UART) accept it?
+    static uint32_t last_dbg_ms;
+    uint32_t now = hal_now_ms();
+    if (now - last_dbg_ms < 1000u)
         return;
-    uint8_t buf[64];
-    size_t n = usb_composite_cdc_read(USB_CDC_TARGET, buf, sizeof(buf));
-    uart_passthrough_pump(buf, n);
+    last_dbg_ms = now;
+    if (!enabled) {
+        diag_printf("UARTDBG: en=0 (bridge disabled — run `uart enter` and keep the "
+                    "Target UART CDC open; closing it tears the bridge down)\n");
+        return;
+    }
+    hal_uart_rx_diag_t d;
+    hal_uart_get_rx_diag(&d);
+    diag_printf("UARTDBG-IN: en=1 rxpin=%lu fsel_tx=%lu fsel_rx=%lu cr=0x%03lX "
+                "lcr=0x%02lX fr=0x%03lX rd=%lu fe=%lu pe=%lu be=%lu oe=%lu\n",
+                (unsigned long)d.rx_level, (unsigned long)d.func_tx,
+                (unsigned long)d.func_rx, (unsigned long)d.cr, (unsigned long)d.lcr_h,
+                (unsigned long)d.fr, (unsigned long)d.bytes_read,
+                (unsigned long)d.err_framing, (unsigned long)d.err_parity,
+                (unsigned long)d.err_break, (unsigned long)d.err_overrun);
+    diag_printf("UARTDBG-OUT: tgt_conn=%d fwd=%lu cdc_acc=%lu\n",
+                (int)usb_composite_cdc_connected(USB_CDC_TARGET),
+                (unsigned long)s_dbg_fwd, (unsigned long)s_dbg_cdc_acc);
 }
 
 // -----------------------------------------------------------------------------

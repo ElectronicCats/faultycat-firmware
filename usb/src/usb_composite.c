@@ -31,23 +31,6 @@ void usb_composite_init(void) {
     tusb_init();
 }
 
-// Echo every received byte back on the same CDC. F3-1 exists to
-// prove enumeration + bidirectional traffic per interface; later
-// commits replace this per-CDC with real protocol handlers
-// (emfi_proto, crowbar_proto, scanner shell, UART passthrough).
-static void echo_cdc(uint8_t cdc_idx) {
-    if (!tud_cdc_n_available(cdc_idx)) {
-        return;
-    }
-    uint8_t buf[64];
-    uint32_t count = tud_cdc_n_read(cdc_idx, buf, sizeof(buf));
-    if (count == 0) {
-        return;
-    }
-    tud_cdc_n_write(cdc_idx, buf, count);
-    tud_cdc_n_write_flush(cdc_idx);
-}
-
 // CMSIS-DAP v2 stub: pull a request packet off the vendor IF, hand
 // it to dap_stub_handle, push the response back. F7 replaces this
 // with services/daplink_usb/ which streams SWD transfers and talks
@@ -76,15 +59,12 @@ void usb_composite_task(void) {
     tud_task();
     // CDC0 owned by emfi_proto (F4), CDC1 by crowbar_proto (F5-4),
     // CDC2 by the unified diag shell (F6-5 → F8-3, dispatching SWD
-    // / JTAG / SCAN / BPIRATE / SERPROG) — all pumped from main.c.
-    // CDC3 (target-UART) still echoes until a future phase claims
-    // it. Reading any owned CDC here would race the main-side pump
-    // and consume the bytes before the protocol/parser sees them
-    // (the F5-4 echo bug, repeated at F6-5 — see memory note
-    // feedback_usb_cdc_echo_loop).
-    for (uint8_t i = 3; i < USB_CDC_COUNT; i++) {
-        echo_cdc(i);
-    }
+    // / JTAG / SCAN / BPIRATE / SERPROG), CDC3 by uart_passthrough
+    // (F8, target-UART byte bridge) — all pumped from main.c. Reading
+    // any owned CDC here would race the main-side pump and consume
+    // the bytes before the protocol/parser sees them (the F5-4 echo
+    // bug, repeated at F6-5 — see memory note
+    // feedback_usb_cdc_echo_loop). No unclaimed CDCs left to echo.
     pump_vendor();
     // HID pump is entirely callback-driven (tud_hid_set_report_cb
     // below); nothing to poll from the main loop.
