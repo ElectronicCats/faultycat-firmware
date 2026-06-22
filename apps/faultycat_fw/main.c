@@ -1639,8 +1639,13 @@ int main(void) {
         // pico-sdk is a busy-wait that does NOT service tud_task, so
         // Windows SETUPs arriving during that 20 ms window pile up
         // and trigger Code 43 / DEVICE_DESCRIPTOR_FAILURE.
+        // Also pump the UART passthrough here so the 16-byte RX FIFO
+        // is drained every 1 ms instead of once per 20 ms iteration —
+        // at the bridge's higher baud rates a full 20 ms gap can
+        // overrun the FIFO before pump_uart_passthrough() above runs again.
         for (uint32_t i = 0; i < BUTTON_POLL_PERIOD_MS; i++) {
             usb_composite_task();
+            pump_uart_passthrough();
             hal_busy_wait_us(1000);
         }
     }
