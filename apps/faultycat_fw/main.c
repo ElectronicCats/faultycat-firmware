@@ -969,9 +969,9 @@ static void pump_uart_passthrough(void) {
                 (unsigned long)d.bytes_read, (unsigned long)d.err_framing,
                 (unsigned long)d.err_parity, (unsigned long)d.err_break,
                 (unsigned long)d.err_overrun);
-    diag_printf("UARTDBG-OUT: tgt_conn=%d fwd=%lu cdc_acc=%lu\n",
+    diag_printf("UARTDBG-OUT: tgt_conn=%d fwd=%lu cdc_acc=%lu tx_dropped=%lu\n",
                 (int)usb_composite_cdc_connected(USB_CDC_TARGET), (unsigned long)s_dbg_fwd,
-                (unsigned long)s_dbg_cdc_acc);
+                (unsigned long)s_dbg_cdc_acc, (unsigned long)uart_passthrough_get_tx_dropped());
 }
 
 // -----------------------------------------------------------------------------

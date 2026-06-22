@@ -50,4 +50,16 @@ hal_uart_config_t uart_passthrough_get_config(void);
 // these from CDC3 and hands them here) into the UART TX FIFO, then
 // drains whatever's waiting in the UART RX FIFO out through
 // `write_byte`. No-op if not enabled. Call once per main-loop tick.
+//
+// Bytes that don't fit in the UART's hardware TX FIFO are staged
+// internally and retried on the next call rather than dropped — see
+// `uart_passthrough_get_tx_dropped` for the only case bytes are still
+// lost (sustained host throughput above what the configured baud can
+// drain, for long enough to fill the staging buffer too).
 void uart_passthrough_pump(const uint8_t* from_host, size_t from_host_len);
+
+// Bytes lost on the host→target path because the retry-staging buffer
+// itself filled up. Stays 0 under normal operation; a nonzero count
+// means the host is pushing data faster than the configured baud rate
+// can physically drain, not a bridge bug.
+uint32_t uart_passthrough_get_tx_dropped(void);
