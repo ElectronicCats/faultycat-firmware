@@ -180,6 +180,7 @@ function(faultycat_add_service_pinout_test name)
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_phy.c
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_dp.c
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_mem.c
+        ${CMAKE_SOURCE_DIR}/services/swd_bus_lock/swd_bus_lock.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake)
     target_include_directories(${name} PRIVATE
@@ -187,6 +188,7 @@ function(faultycat_add_service_pinout_test name)
         ${CMAKE_SOURCE_DIR}/services/pinout_scanner
         ${CMAKE_SOURCE_DIR}/services/jtag_core
         ${CMAKE_SOURCE_DIR}/services/swd_core
+        ${CMAKE_SOURCE_DIR}/services/swd_bus_lock
     )
     add_test(NAME ${name} COMMAND ${name})
 endfunction()

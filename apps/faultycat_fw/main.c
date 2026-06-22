@@ -229,6 +229,24 @@ static FW_WIP_UNUSED bool ensure_inited(void) {
     return true;
 }
 
+// Service-layer SWD bus mutex (services/swd_bus_lock), held around
+// each command's actual DP/mem transaction so a concurrent campaign
+// verify hook, pinout_scanner sweep, or future daplink_usb session
+// can't interleave with an interactive shell command mid-transaction.
+// try_acquire: fail fast with a shell-visible error rather than
+// blocking the operator's terminal.
+static FW_WIP_UNUSED bool swd_shell_lock(void) {
+    if (!swd_bus_try_acquire(SWD_BUS_OWNER_SHELL)) {
+        shell_print("SWD: ERR bus_busy (held by another service)\n");
+        return false;
+    }
+    return true;
+}
+
+static FW_WIP_UNUSED void swd_shell_unlock(void) {
+    swd_bus_release(SWD_BUS_OWNER_SHELL);
+}
+
 static FW_WIP_UNUSED void cmd_init(int argc, char** argv) {
     // F8-1 soft-lock: SWD and JTAG share GP0..GP7. Refuse SWD init
     // while JTAG owns the bus instead of silently corrupting both.
@@ -268,13 +286,18 @@ static FW_WIP_UNUSED void cmd_freq(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     uint32_t khz = (uint32_t)strtoul(argv[2], NULL, 0);
     swd_phy_set_clk_khz(khz);
     shell_printf("SWD: OK freq %u khz (clamped to range if needed)\n", khz);
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_connect(void) {
     if (!ensure_inited())
+        return;
+    if (!swd_shell_lock())
         return;
     uint32_t dpidr   = 0u;
     swd_dp_ack_t ack = swd_dp_connect(SWD_DP_TARGETSEL_RP2040_CORE0, &dpidr);
@@ -283,10 +306,13 @@ static FW_WIP_UNUSED void cmd_connect(void) {
     } else {
         shell_printf("SWD: ERR connect ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_bus_detect(void) {
     if (!ensure_inited())
+        return;
+    if (!swd_shell_lock())
         return;
     uint32_t dpidr   = 0u;
     swd_dp_ack_t ack = swd_dp_bus_detect(&dpidr);
@@ -295,6 +321,7 @@ static FW_WIP_UNUSED void cmd_bus_detect(void) {
     } else {
         shell_printf("SWD: ERR bus-detect ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_read32(int argc, char** argv) {
@@ -304,10 +331,13 @@ static FW_WIP_UNUSED void cmd_read32(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     uint32_t addr    = (uint32_t)strtoul(argv[2], NULL, 16);
     swd_dp_ack_t ack = swd_mem_init();
     if (ack != SWD_ACK_OK) {
         shell_printf("SWD: ERR mem_init ack=%s\n", ack_label(ack));
+        swd_shell_unlock();
         return;
     }
     uint32_t val = 0u;
@@ -317,6 +347,7 @@ static FW_WIP_UNUSED void cmd_read32(int argc, char** argv) {
     } else {
         shell_printf("SWD: ERR read32 ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_write32(int argc, char** argv) {
@@ -326,11 +357,14 @@ static FW_WIP_UNUSED void cmd_write32(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     uint32_t addr    = (uint32_t)strtoul(argv[2], NULL, 16);
     uint32_t val     = (uint32_t)strtoul(argv[3], NULL, 16);
     swd_dp_ack_t ack = swd_mem_init();
     if (ack != SWD_ACK_OK) {
         shell_printf("SWD: ERR mem_init ack=%s\n", ack_label(ack));
+        swd_shell_unlock();
         return;
     }
     ack = swd_mem_write32(addr, val);
@@ -340,6 +374,7 @@ static FW_WIP_UNUSED void cmd_write32(int argc, char** argv) {
     } else {
         shell_printf("SWD: ERR write32 ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_reset(int argc, char** argv) {
@@ -349,9 +384,12 @@ static FW_WIP_UNUSED void cmd_reset(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     bool assert_low = (argv[2][0] == '1');
     swd_phy_assert_reset(assert_low);
     shell_printf("SWD: OK reset asserted=%d level=%d\n", assert_low ? 1 : 0, swd_phy_reset_level());
+    swd_shell_unlock();
 }
 
 // -----------------------------------------------------------------------------
@@ -922,14 +960,14 @@ static void pump_uart_passthrough(void) {
     hal_uart_get_rx_diag(&d);
     diag_printf("UARTDBG-IN: en=1 rxpin=%lu fsel_tx=%lu fsel_rx=%lu cr=0x%03lX "
                 "lcr=0x%02lX fr=0x%03lX rd=%lu fe=%lu pe=%lu be=%lu oe=%lu\n",
-                (unsigned long)d.rx_level, (unsigned long)d.func_tx,
-                (unsigned long)d.func_rx, (unsigned long)d.cr, (unsigned long)d.lcr_h,
-                (unsigned long)d.fr, (unsigned long)d.bytes_read,
-                (unsigned long)d.err_framing, (unsigned long)d.err_parity,
-                (unsigned long)d.err_break, (unsigned long)d.err_overrun);
+                (unsigned long)d.rx_level, (unsigned long)d.func_tx, (unsigned long)d.func_rx,
+                (unsigned long)d.cr, (unsigned long)d.lcr_h, (unsigned long)d.fr,
+                (unsigned long)d.bytes_read, (unsigned long)d.err_framing,
+                (unsigned long)d.err_parity, (unsigned long)d.err_break,
+                (unsigned long)d.err_overrun);
     diag_printf("UARTDBG-OUT: tgt_conn=%d fwd=%lu cdc_acc=%lu\n",
-                (int)usb_composite_cdc_connected(USB_CDC_TARGET),
-                (unsigned long)s_dbg_fwd, (unsigned long)s_dbg_cdc_acc);
+                (int)usb_composite_cdc_connected(USB_CDC_TARGET), (unsigned long)s_dbg_fwd,
+                (unsigned long)s_dbg_cdc_acc);
 }
 
 // -----------------------------------------------------------------------------

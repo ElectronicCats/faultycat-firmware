@@ -29,6 +29,13 @@
 // the soft-lock is re-checkable. The shell-level soft-lock that
 // F8-1 added between SWD and JTAG still applies — `scan` refuses
 // if either swd_phy or jtag_core is currently held.
+//
+// pinout_scan_swd additionally holds the service-layer SWD bus
+// mutex (services/swd_bus_lock) as SWD_BUS_OWNER_SCANNER for the
+// whole sweep, so a concurrent campaign verify hook or a DAPLink
+// host can't interleave SWD transactions with the scan. Acquired
+// with try_acquire — if the bus is already held, the scan fails
+// fast (returns false) instead of blocking the shell.
 
 #define PINOUT_SCANNER_CHANNELS  8u
 #define PINOUT_SCANNER_JTAG_PINS 4u
