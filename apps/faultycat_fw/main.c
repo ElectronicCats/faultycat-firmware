@@ -487,15 +487,36 @@ static void scan_yield_progress(uint32_t cur, uint32_t total) {
     }
 }
 
-static FW_WIP_UNUSED void cmd_scan_jtag(void) {
+// Mutual exclusion across every scanner-header consumer: direct-SWD
+// shell, JTAG shell/scan, BusPirate (rides on jtag_core, so covered
+// by jtag_is_inited()), serprog (bit-bangs raw GPIO with no jtag/swd
+// flag of its own — needs its own check), and UART passthrough (owns
+// UART0 on CH0/CH1). Every entry point below (`scan jtag`, `scan swd`,
+// `buspirate enter`, `serprog enter`, `uart enter`) must route through
+// this single check so a new consumer can't silently skip a neighbour.
+static bool shell_bus_busy(const char* prefix) {
     if (jtag_is_inited()) {
-        shell_print("SCAN: ERR jtag_in_use (run `jtag deinit` first)\n");
-        return;
+        shell_printf("%s: ERR jtag_in_use (run `jtag deinit` first)\n", prefix);
+        return true;
     }
     if (swd_shell_inited) {
-        shell_print("SCAN: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
+        shell_printf("%s: ERR swd_in_use (run `swd deinit` first)\n", prefix);
+        return true;
     }
+    if (s_shell_mode == SHELL_MODE_SERPROG) {
+        shell_printf("%s: ERR serprog_in_use (run `serprog exit` first)\n", prefix);
+        return true;
+    }
+    if (uart_passthrough_is_enabled()) {
+        shell_printf("%s: ERR uart_in_use (run `uart exit` first)\n", prefix);
+        return true;
+    }
+    return false;
+}
+
+static FW_WIP_UNUSED void cmd_scan_jtag(void) {
+    if (shell_bus_busy("SCAN"))
+        return;
     shell_printf("SCAN: starting JTAG pinout scan over %u channels (P(%u,%u)=%lu)\n",
                  PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_JTAG_PINS,
                  (unsigned long)PINOUT_SCANNER_JTAG_TOTAL);
@@ -512,14 +533,8 @@ static FW_WIP_UNUSED void cmd_scan_jtag(void) {
 }
 
 static void cmd_scan_swd(int argc, char** argv) {
-    if (jtag_is_inited()) {
-        shell_print("SCAN: ERR jtag_in_use (run `jtag deinit` first)\n");
+    if (shell_bus_busy("SCAN"))
         return;
-    }
-    if (swd_shell_inited) {
-        shell_print("SCAN: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
-    }
 
     shell_printf("SCAN: starting SWD pinout scan over %u channels "
                  "(P(%u,%u)=%u) targetsel_compat=0x%08lX\n",
@@ -603,14 +618,8 @@ static void process_buspirate_subcmd(int argc, char** argv) {
         shell_print("BPIRATE: ERR usage: buspirate enter [<tdi> <tdo> <tms> <tck>]\n");
         return;
     }
-    if (jtag_is_inited()) {
-        shell_print("BPIRATE: ERR jtag_in_use (run `jtag deinit` first)\n");
+    if (shell_bus_busy("BPIRATE"))
         return;
-    }
-    if (swd_shell_inited) {
-        shell_print("BPIRATE: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
-    }
     bool explicit_pins = (argc >= 6);
     jtag_pinout_t p    = {
            .tdi  = explicit_pins ? (uint8_t)strtoul(argv[2], NULL, 0) : BOARD_GP_SCANNER_CH0,
@@ -717,14 +726,8 @@ static void process_serprog_subcmd(int argc, char** argv) {
         shell_print("SERPROG: ERR usage: serprog enter [<cs> <mosi> <miso> <sck>]\n");
         return;
     }
-    if (jtag_is_inited()) {
-        shell_print("SERPROG: ERR jtag_in_use (run `jtag deinit` first)\n");
+    if (shell_bus_busy("SERPROG"))
         return;
-    }
-    if (swd_shell_inited) {
-        shell_print("SERPROG: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
-    }
     bool explicit_pins = (argc >= 6);
     s_sp_pin_cs        = explicit_pins ? (uint8_t)strtoul(argv[2], NULL, 0) : BOARD_GP_SCANNER_CH0;
     s_sp_pin_mosi      = explicit_pins ? (uint8_t)strtoul(argv[3], NULL, 0) : BOARD_GP_SCANNER_CH1;
@@ -809,14 +812,8 @@ static void process_uart_subcmd(int argc, char** argv) {
     const char* sub = argv[1];
 
     if (!strcmp(sub, "enter")) {
-        if (jtag_is_inited()) {
-            shell_print("UART: ERR jtag_in_use (run `jtag deinit` first)\n");
+        if (shell_bus_busy("UART"))
             return;
-        }
-        if (swd_shell_inited) {
-            shell_print("UART: ERR swd_in_use (run `swd deinit` first)\n");
-            return;
-        }
         hal_uart_config_t cfg = {
             .baudrate  = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 115200u,
             .data_bits = 8u,
