@@ -144,6 +144,72 @@ static void test_pump_is_no_op_when_disabled(void) {
 }
 
 // -----------------------------------------------------------------------------
+// TX retry — host→target bytes that don't fit the UART's hardware FIFO
+// in one pump must be retried, not dropped (see hal/src/rp2040/uart.c's
+// PL011 FIFO and services/uart_passthrough/uart_passthrough.c's staging
+// buffer fix).
+// -----------------------------------------------------------------------------
+
+static void test_pump_retries_bytes_that_overflow_fifo(void) {
+    TEST_ASSERT_TRUE(uart_passthrough_enable(DEFAULT_CFG, &TEST_CALLBACKS));
+    // Simulate a 2-byte FIFO: only the first 2 of 5 bytes go out on
+    // this pump.
+    hal_fake_uart_state.tx_room_per_call = 2u;
+    const uint8_t host_bytes[]           = {0x01, 0x02, 0x03, 0x04, 0x05};
+    uart_passthrough_pump(host_bytes, sizeof(host_bytes));
+    TEST_ASSERT_EQUAL(2u, hal_fake_uart_state.tx_len);
+    TEST_ASSERT_EQUAL_UINT32(0u, uart_passthrough_get_tx_dropped());
+
+    // FIFO drains (simulated as "unlimited room" again) on the next
+    // pump — the staged 3 bytes go out with no new host bytes, in order.
+    hal_fake_uart_state.tx_room_per_call = 0u;
+    uart_passthrough_pump(NULL, 0);
+    TEST_ASSERT_EQUAL(5u, hal_fake_uart_state.tx_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(host_bytes, hal_fake_uart_state.tx_buf, sizeof(host_bytes));
+    TEST_ASSERT_EQUAL_UINT32(0u, uart_passthrough_get_tx_dropped());
+}
+
+static void test_pump_preserves_order_across_staged_and_new_bytes(void) {
+    TEST_ASSERT_TRUE(uart_passthrough_enable(DEFAULT_CFG, &TEST_CALLBACKS));
+    hal_fake_uart_state.tx_room_per_call = 1u;
+    const uint8_t first[]                = {0xAA, 0xBB};
+    uart_passthrough_pump(first, sizeof(first)); // 0xAA out, 0xBB staged
+
+    const uint8_t second[] = {0xCC, 0xDD};
+    // FIFO still saturated — second batch must queue behind 0xBB, not
+    // jump ahead of it.
+    uart_passthrough_pump(second, sizeof(second));
+
+    hal_fake_uart_state.tx_room_per_call = 0u;
+    uart_passthrough_pump(NULL, 0);
+
+    const uint8_t expected[] = {0xAA, 0xBB, 0xCC, 0xDD};
+    TEST_ASSERT_EQUAL(sizeof(expected), hal_fake_uart_state.tx_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, hal_fake_uart_state.tx_buf, sizeof(expected));
+}
+
+static void test_pump_counts_drops_when_staging_buffer_also_full(void) {
+    TEST_ASSERT_TRUE(uart_passthrough_enable(DEFAULT_CFG, &TEST_CALLBACKS));
+    // FIFO completely stalled — every byte must land in the staging
+    // buffer (256 B cap). A 300-byte burst overflows it by 44 bytes.
+    hal_fake_uart_state.tx_blocked = true;
+    static uint8_t big[300];
+    memset(big, 0x5A, sizeof(big));
+    uart_passthrough_pump(big, sizeof(big));
+    TEST_ASSERT_EQUAL(0u, hal_fake_uart_state.tx_len);
+    TEST_ASSERT_EQUAL_UINT32(44u, uart_passthrough_get_tx_dropped());
+
+    // FIFO recovers — the 256 staged bytes drain in order; the 44
+    // dropped bytes are gone for good (the documented, honest cost of
+    // exceeding the bridge's backpressure budget).
+    hal_fake_uart_state.tx_blocked = false;
+    uart_passthrough_pump(NULL, 0);
+    TEST_ASSERT_EQUAL(256u, hal_fake_uart_state.tx_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(big, hal_fake_uart_state.tx_buf, 256u);
+    TEST_ASSERT_EQUAL_UINT32(44u, uart_passthrough_get_tx_dropped());
+}
+
+// -----------------------------------------------------------------------------
 // Runner
 // -----------------------------------------------------------------------------
 
@@ -165,6 +231,10 @@ int main(void) {
     RUN_TEST(test_pump_writes_host_bytes_to_uart);
     RUN_TEST(test_pump_drains_uart_rx_to_host);
     RUN_TEST(test_pump_is_no_op_when_disabled);
+
+    RUN_TEST(test_pump_retries_bytes_that_overflow_fifo);
+    RUN_TEST(test_pump_preserves_order_across_staged_and_new_bytes);
+    RUN_TEST(test_pump_counts_drops_when_staging_buffer_also_full);
 
     return UNITY_END();
 }

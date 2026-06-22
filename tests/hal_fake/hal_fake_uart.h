@@ -19,6 +19,17 @@ typedef struct {
     uint8_t tx_buf[HAL_FAKE_UART_TX_CAP]; // bytes the service wrote out
     size_t tx_len;
 
+    // Caps how many bytes a single hal_uart_write() call accepts,
+    // independent of the remaining tx_buf capacity — simulates a
+    // hardware TX FIFO that's smaller than what the caller hands it.
+    // 0 = unlimited (default).
+    size_t tx_room_per_call;
+
+    // When true, hal_uart_write() accepts 0 bytes regardless of
+    // tx_room_per_call — simulates a fully stalled TX FIFO (e.g. the
+    // line is disconnected / target not draining).
+    bool tx_blocked;
+
     uint8_t rx_buf[HAL_FAKE_UART_RX_CAP]; // bytes a test injects as "received"
     size_t rx_len;
     size_t rx_pos;

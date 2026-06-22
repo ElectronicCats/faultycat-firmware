@@ -32,8 +32,13 @@ void hal_uart_set_config(hal_uart_config_t cfg) {
 }
 
 size_t hal_uart_write(const uint8_t* data, size_t len) {
+    if (hal_fake_uart_state.tx_blocked)
+        return 0;
     size_t space = HAL_FAKE_UART_TX_CAP - hal_fake_uart_state.tx_len;
     size_t n     = len > space ? space : len;
+    if (hal_fake_uart_state.tx_room_per_call != 0 && n > hal_fake_uart_state.tx_room_per_call) {
+        n = hal_fake_uart_state.tx_room_per_call;
+    }
     memcpy(&hal_fake_uart_state.tx_buf[hal_fake_uart_state.tx_len], data, n);
     hal_fake_uart_state.tx_len += n;
     return n;
