@@ -158,6 +158,8 @@ static void test_constants_match_iterator_total(void) {
                              pinout_perm_total(PINOUT_SCANNER_JTAG_PINS, PINOUT_SCANNER_CHANNELS));
     TEST_ASSERT_EQUAL_UINT32(PINOUT_SCANNER_SWD_TOTAL,
                              pinout_perm_total(PINOUT_SCANNER_SWD_PINS, PINOUT_SCANNER_CHANNELS));
+    TEST_ASSERT_EQUAL_UINT32(PINOUT_SCANNER_I2C_TOTAL,
+                             pinout_perm_total(PINOUT_SCANNER_I2C_PINS, PINOUT_SCANNER_CHANNELS));
 }
 
 // -----------------------------------------------------------------------------
