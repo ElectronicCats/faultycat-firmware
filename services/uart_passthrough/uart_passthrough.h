@@ -22,11 +22,10 @@
 // the bus is held by another owner, mirroring the contract callers
 // already get from `swd_bus_try_acquire`.
 //
-// Target→host (UART RX) bytes are also mirrored out hal/uart_debug.h
-// (UART1 TX, GP4) for external debugging — a logic analyzer or a
-// second terminal can watch the same stream without touching the
-// CDC3 link. TX-only, best-effort: if that FIFO can't keep up the
-// mirrored bytes are dropped, but the primary host path is unaffected.
+// Verified against real hardware: an STM32F429-Disc1 driving UART2
+// (PA2 TX / PA3 RX) through a TXS0108EPW level shifter into the
+// scanner header CH0/CH1 round-trips cleanly in both `uart enable`
+// and `uart console` modes.
 
 typedef struct {
     void (*write_byte)(uint8_t b, void* user); // → host CDC (TX path)

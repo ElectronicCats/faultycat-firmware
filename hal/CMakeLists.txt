@@ -10,7 +10,6 @@ add_library(hal_rp2040 STATIC
     src/rp2040/pio.c
     src/rp2040/dma.c
     src/rp2040/uart.c
-    src/rp2040/uart_debug.c
 )
 
 target_include_directories(hal_rp2040
