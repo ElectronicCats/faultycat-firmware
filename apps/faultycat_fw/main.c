@@ -178,7 +178,8 @@ static void shell_help(void) {
     shell_print("SHELL: --- Pinout scan ---\n");
     shell_print("SHELL:   scan swd  [<targetsel_hex>]                  P(8,2)=56 perms\n");
     shell_print("SHELL:   scan i2c                                    P(8,2)=56 perms\n");
-    shell_print("SHELL:   i2c probe <sda> <scl>                       rescan addrs on known pins\n");
+    shell_print(
+        "SHELL:   i2c probe <sda> <scl>                       rescan addrs on known pins\n");
     shell_print("SHELL: --- Campaign (F9) ---\n");
     shell_print("SHELL:   campaign status                              show state + counters\n");
     shell_print("SHELL:   campaign stop                                halt running sweep\n");
