@@ -29,6 +29,7 @@
 #include "hal/time.h"
 #include "hal/uart.h"
 #include "hv_charger.h"
+#include "i2c_core.h"
 #include "jtag_core.h"
 #include "board_v2.h"
 #include "pinout_scanner.h"
@@ -176,6 +177,8 @@ static void shell_help(void) {
     shell_print("SHELL:   version                                       report firmware version\n");
     shell_print("SHELL: --- Pinout scan ---\n");
     shell_print("SHELL:   scan swd  [<targetsel_hex>]                  P(8,2)=56 perms\n");
+    shell_print("SHELL:   scan i2c                                    P(8,2)=56 perms\n");
+    shell_print("SHELL:   i2c probe <sda> <scl>                       rescan addrs on known pins\n");
     shell_print("SHELL: --- Campaign (F9) ---\n");
     shell_print("SHELL:   campaign status                              show state + counters\n");
     shell_print("SHELL:   campaign stop                                halt running sweep\n");
@@ -526,12 +529,13 @@ static void scan_yield_progress(uint32_t cur, uint32_t total) {
 }
 
 // Mutual exclusion across every scanner-header consumer: direct-SWD
-// shell, JTAG shell/scan, BusPirate (rides on jtag_core, so covered
-// by jtag_is_inited()), serprog (bit-bangs raw GPIO with no jtag/swd
-// flag of its own — needs its own check), and UART passthrough (owns
-// UART0 on CH0/CH1). Every entry point below (`scan jtag`, `scan swd`,
-// `buspirate enter`, `serprog enter`, `uart enter`) must route through
-// this single check so a new consumer can't silently skip a neighbour.
+// shell, JTAG shell/scan, I2C scan/probe, BusPirate (rides on
+// jtag_core, so covered by jtag_is_inited()), serprog (bit-bangs raw
+// GPIO with no jtag/swd flag of its own — needs its own check), and
+// UART passthrough (owns UART0 on CH0/CH1). Every entry point below
+// (`scan jtag`, `scan swd`, `scan i2c`, `i2c probe`, `buspirate
+// enter`, `serprog enter`, `uart enter`) must route through this
+// single check so a new consumer can't silently skip a neighbour.
 static bool shell_bus_busy(const char* prefix) {
     if (jtag_is_inited()) {
         shell_printf("%s: ERR jtag_in_use (run `jtag deinit` first)\n", prefix);
@@ -539,6 +543,10 @@ static bool shell_bus_busy(const char* prefix) {
     }
     if (swd_shell_inited) {
         shell_printf("%s: ERR swd_in_use (run `swd deinit` first)\n", prefix);
+        return true;
+    }
+    if (i2c_is_inited()) {
+        shell_printf("%s: ERR i2c_in_use (wait for the running scan/probe to finish)\n", prefix);
         return true;
     }
     if (s_shell_mode == SHELL_MODE_SERPROG) {
@@ -593,14 +601,40 @@ static void cmd_scan_swd(int argc, char** argv) {
                  (unsigned long)r.targetsel);
 }
 
+static void cmd_scan_i2c(void) {
+    if (shell_bus_busy("SCAN"))
+        return;
+
+    shell_printf("SCAN: starting I2C pinout scan over %u channels (P(%u,%u)=%u)\n",
+                 PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_I2C_PINS,
+                 PINOUT_SCANNER_I2C_TOTAL);
+    pinout_scan_i2c_result_t r;
+    pinout_scan_i2c_status_t status = pinout_scan_i2c(&r, scan_yield_progress);
+    if (status == PINOUT_SCAN_I2C_BUS_BUSY) {
+        shell_print("SCAN: ERR bus_busy (I2C bus held by another service)\n");
+        return;
+    }
+    if (status != PINOUT_SCAN_I2C_MATCH) {
+        shell_print("SCAN: i2c NO_MATCH (no ACKed address found)\n");
+        return;
+    }
+    shell_printf("SCAN: i2c MATCH sda=GP%u scl=GP%u found=%u\n", r.sda, r.scl,
+                 (unsigned)r.addr_count);
+    for (size_t i = 0; i < r.addr_count; i++) {
+        shell_printf("SCAN:   addr=0x%02X\n", r.addrs[i]);
+    }
+}
+
 static void process_scan_subcmd(int argc, char** argv) {
     if (argc < 2) {
-        shell_print("SCAN: ERR scan needs subcommand: swd\n");
+        shell_print("SCAN: ERR scan needs subcommand: swd, i2c\n");
         return;
     }
     const char* sub = argv[1];
     if (!strcmp(sub, "swd"))
         cmd_scan_swd(argc, argv);
+    else if (!strcmp(sub, "i2c"))
+        cmd_scan_i2c();
     else if (!strcmp(sub, "jtag")) {
         // F11 release: `scan jtag` is WIP and hidden from the public
         // surface. The implementation (cmd_scan_jtag + service_jtag +
@@ -610,6 +644,62 @@ static void process_scan_subcmd(int argc, char** argv) {
     } else {
         shell_printf("SCAN: ERR unknown_subcmd: %s (try `?`)\n", sub);
     }
+}
+
+// -----------------------------------------------------------------------------
+// I2C manual probe — `i2c probe <sda> <scl>`
+//
+// Once `scan i2c` (or a prior probe) has told the operator which two
+// channels carry SDA/SCL, re-running the full P(8,2)=56 sweep just to
+// refresh the address list is wasted time — same motivation as `swd
+// connect` defaulting to fixed pins instead of re-scanning. This
+// reuses the bus mutex contract from pinout_scan_i2c (try_acquire as
+// SWD_BUS_OWNER_I2C_SCANNER) so a probe can't interleave with a
+// concurrent sweep or another service on the header.
+// -----------------------------------------------------------------------------
+
+static void cmd_i2c_probe(int argc, char** argv) {
+    if (argc < 4) {
+        shell_print("I2C: ERR usage: i2c probe <sda> <scl>\n");
+        return;
+    }
+    if (shell_bus_busy("I2C"))
+        return;
+    uint8_t sda = (uint8_t)strtoul(argv[2], NULL, 0);
+    uint8_t scl = (uint8_t)strtoul(argv[3], NULL, 0);
+    if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
+        shell_print("I2C: ERR bus_busy (held by another service)\n");
+        return;
+    }
+    if (!i2c_init(sda, scl, 100)) {
+        shell_print("I2C: ERR init_failed (pin range or duplicate?)\n");
+        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+        return;
+    }
+    uint8_t addrs[PINOUT_SCANNER_I2C_MAX_ADDRS];
+    size_t n = i2c_bus_scan(addrs, PINOUT_SCANNER_I2C_MAX_ADDRS);
+    i2c_deinit();
+    swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+    if (n == 0) {
+        shell_printf("I2C: NO_MATCH sda=GP%u scl=GP%u (no ACKed address)\n", sda, scl);
+        return;
+    }
+    shell_printf("I2C: OK probe sda=GP%u scl=GP%u found=%u\n", sda, scl, (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        shell_printf("I2C:   addr=0x%02X\n", addrs[i]);
+    }
+}
+
+static void process_i2c_subcmd(int argc, char** argv) {
+    if (argc < 2) {
+        shell_print("I2C: ERR i2c needs subcommand: probe\n");
+        return;
+    }
+    const char* sub = argv[1];
+    if (!strcmp(sub, "probe"))
+        cmd_i2c_probe(argc, argv);
+    else
+        shell_printf("I2C: ERR unknown_subcmd: %s (try `?`)\n", sub);
 }
 
 // -----------------------------------------------------------------------------
@@ -1314,6 +1404,10 @@ static void process_shell_line(char* line) {
     }
     if (!strcmp(argv[0], "uart")) {
         process_uart_subcmd(argc, argv);
+        return;
+    }
+    if (!strcmp(argv[0], "i2c")) {
+        process_i2c_subcmd(argc, argv);
         return;
     }
     // F11 release: the JTAG sub-shell and the direct-SWD sub-shell are
