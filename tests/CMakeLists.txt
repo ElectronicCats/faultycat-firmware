@@ -246,6 +246,24 @@ endfunction()
 
 faultycat_add_service_swd_bus_lock_test(test_swd_bus_lock)
 
+# I2C logic analyzer — passive sampler, sibling of i2c_core (see
+# docs/I2C_LOGIC_ANALYZER_PLAN.md). Links i2c_la.c only — independent
+# lifecycle from the bit-bang master.
+function(faultycat_add_service_i2c_la_test name)
+    add_executable(${name}
+        ${name}.c
+        ${CMAKE_SOURCE_DIR}/services/i2c_core/i2c_la.c
+    )
+    target_link_libraries(${name} PRIVATE unity hal_fake)
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/drivers/include
+        ${CMAKE_SOURCE_DIR}/services/i2c_core
+    )
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+faultycat_add_service_i2c_la_test(test_i2c_la)
+
 # F9-2 — campaign_manager (sweep state machine + ringbuffer)
 function(faultycat_add_service_campaign_test name)
     add_executable(${name}
