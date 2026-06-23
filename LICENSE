@@ -36,7 +36,7 @@ SCOPE OF THIS LICENSE
 This BSD-3-Clause license applies to all firmware source code authored
 for the FaultyCat v3 rewrite — every file under the roots:
 
-  apps/ hal/ drivers/ services/ usb/ tests/ host/faultycmd-rs/
+  apps/ hal/ drivers/ services/ usb/ tests/
   tools/ docs/ and the root-level build files (CMakeLists.txt,
   CMakePresets.json, .github/workflows/*).
 
@@ -45,8 +45,6 @@ It does NOT apply to:
   - third_party/*  : each vendored dependency retains its own upstream
                      license. See LICENSES/UPSTREAM-<name>.txt for
                      verbatim copies.
-  - Hardware/      : the KiCad / PCB design files are licensed
-                     CC BY-SA 3.0 by Electronic Cats.
-  - firmware/c/    : the legacy v2.x firmware (kept in the repo for
-                     historical reference) carries the licenses it had
-                     on the `main` branch before this rewrite.
+
+The FaultyCat v2.x hardware design and the Python host tool are
+maintained in their own repositories with their own licensing.

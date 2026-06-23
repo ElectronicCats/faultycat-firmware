@@ -27,6 +27,7 @@
 #include "flashrom_serprog.h"
 #include "hal/gpio.h"
 #include "hal/time.h"
+#include "hal/uart.h"
 #include "hv_charger.h"
 #include "jtag_core.h"
 #include "board_v2.h"
@@ -37,6 +38,7 @@
 #include "swd_mem.h"
 #include "swd_phy.h"
 #include "target_monitor.h"
+#include "uart_passthrough.h"
 #include "firmware_version.h"
 #include "ui_buttons.h"
 #include "ui_leds.h"
@@ -113,7 +115,6 @@ static void diag_banner(void) {
                 EMFI_MANUAL_WIDTH_US);
     diag_printf("                auto-disarms after fire\n");
     diag_printf(" CROWBAR      : controlled via CDC1 (crowbar_proto)\n");
-    diag_printf("                — `faultycmd crowbar ping` to verify\n");
     diag_printf(" EMFI         : controlled via CDC0 (emfi_proto)\n");
     diag_printf(" SCANNER      : line-buffered shell on this CDC (CDC2)\n");
     diag_printf("                type `?` for the command list\n");
@@ -126,7 +127,7 @@ static void diag_banner(void) {
 //
 // Tiny line-buffered text parser shared by all the v3 debug services.
 // Lets the operator drive everything from a serial terminal or from
-// `faultycmd scanner` without needing a host-side CMSIS-DAP stack
+// a host tool without needing a host-side CMSIS-DAP stack
 // (that lands in F7). The shell shares CDC2 with the
 // diag snapshot stream — outputs use a service prefix so the
 // host-side filters can demux:
@@ -189,6 +190,11 @@ static void shell_help(void) {
     shell_print("SHELL:   serprog enter [<cs> <mosi> <miso> <sck>]     flashrom serprog (F8-5)\n");
     shell_print("SHELL:                                                defaults: 0 1 2 3, exit on "
                 "host disconnect\n");
+    shell_print("SHELL: --- UART passthrough (Target UART CDC) ---\n");
+    shell_print(
+        "SHELL:   uart enter [<baud> <n|e|o> <1|2>]            CH0=TX/CH1=RX, default 115200 N1\n");
+    shell_print("SHELL:   uart baud <n> | parity <n|e|o> | stopbits <1|2>   live reconfigure\n");
+    shell_print("SHELL:   uart status | exit\n");
     shell_print("SHELL: NOTE: JTAG and direct-SWD verbs (jtag *, swd *, scan jtag) are\n");
     shell_print("SHELL:       WIP and disabled in this release — they will respond `ERR wip`.\n");
 }
@@ -221,6 +227,24 @@ static FW_WIP_UNUSED bool ensure_inited(void) {
     }
     swd_shell_inited = true;
     return true;
+}
+
+// Service-layer SWD bus mutex (services/swd_bus_lock), held around
+// each command's actual DP/mem transaction so a concurrent campaign
+// verify hook, pinout_scanner sweep, or future daplink_usb session
+// can't interleave with an interactive shell command mid-transaction.
+// try_acquire: fail fast with a shell-visible error rather than
+// blocking the operator's terminal.
+static FW_WIP_UNUSED bool swd_shell_lock(void) {
+    if (!swd_bus_try_acquire(SWD_BUS_OWNER_SHELL)) {
+        shell_print("SWD: ERR bus_busy (held by another service)\n");
+        return false;
+    }
+    return true;
+}
+
+static FW_WIP_UNUSED void swd_shell_unlock(void) {
+    swd_bus_release(SWD_BUS_OWNER_SHELL);
 }
 
 static FW_WIP_UNUSED void cmd_init(int argc, char** argv) {
@@ -262,13 +286,18 @@ static FW_WIP_UNUSED void cmd_freq(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     uint32_t khz = (uint32_t)strtoul(argv[2], NULL, 0);
     swd_phy_set_clk_khz(khz);
     shell_printf("SWD: OK freq %u khz (clamped to range if needed)\n", khz);
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_connect(void) {
     if (!ensure_inited())
+        return;
+    if (!swd_shell_lock())
         return;
     uint32_t dpidr   = 0u;
     swd_dp_ack_t ack = swd_dp_connect(SWD_DP_TARGETSEL_RP2040_CORE0, &dpidr);
@@ -277,10 +306,13 @@ static FW_WIP_UNUSED void cmd_connect(void) {
     } else {
         shell_printf("SWD: ERR connect ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_bus_detect(void) {
     if (!ensure_inited())
+        return;
+    if (!swd_shell_lock())
         return;
     uint32_t dpidr   = 0u;
     swd_dp_ack_t ack = swd_dp_bus_detect(&dpidr);
@@ -289,6 +321,7 @@ static FW_WIP_UNUSED void cmd_bus_detect(void) {
     } else {
         shell_printf("SWD: ERR bus-detect ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_read32(int argc, char** argv) {
@@ -298,10 +331,13 @@ static FW_WIP_UNUSED void cmd_read32(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     uint32_t addr    = (uint32_t)strtoul(argv[2], NULL, 16);
     swd_dp_ack_t ack = swd_mem_init();
     if (ack != SWD_ACK_OK) {
         shell_printf("SWD: ERR mem_init ack=%s\n", ack_label(ack));
+        swd_shell_unlock();
         return;
     }
     uint32_t val = 0u;
@@ -311,6 +347,7 @@ static FW_WIP_UNUSED void cmd_read32(int argc, char** argv) {
     } else {
         shell_printf("SWD: ERR read32 ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_write32(int argc, char** argv) {
@@ -320,11 +357,14 @@ static FW_WIP_UNUSED void cmd_write32(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     uint32_t addr    = (uint32_t)strtoul(argv[2], NULL, 16);
     uint32_t val     = (uint32_t)strtoul(argv[3], NULL, 16);
     swd_dp_ack_t ack = swd_mem_init();
     if (ack != SWD_ACK_OK) {
         shell_printf("SWD: ERR mem_init ack=%s\n", ack_label(ack));
+        swd_shell_unlock();
         return;
     }
     ack = swd_mem_write32(addr, val);
@@ -334,6 +374,7 @@ static FW_WIP_UNUSED void cmd_write32(int argc, char** argv) {
     } else {
         shell_printf("SWD: ERR write32 ack=%s\n", ack_label(ack));
     }
+    swd_shell_unlock();
 }
 
 static FW_WIP_UNUSED void cmd_reset(int argc, char** argv) {
@@ -343,9 +384,12 @@ static FW_WIP_UNUSED void cmd_reset(int argc, char** argv) {
     }
     if (!ensure_inited())
         return;
+    if (!swd_shell_lock())
+        return;
     bool assert_low = (argv[2][0] == '1');
     swd_phy_assert_reset(assert_low);
     shell_printf("SWD: OK reset asserted=%d level=%d\n", assert_low ? 1 : 0, swd_phy_reset_level());
+    swd_shell_unlock();
 }
 
 // -----------------------------------------------------------------------------
@@ -481,15 +525,36 @@ static void scan_yield_progress(uint32_t cur, uint32_t total) {
     }
 }
 
-static FW_WIP_UNUSED void cmd_scan_jtag(void) {
+// Mutual exclusion across every scanner-header consumer: direct-SWD
+// shell, JTAG shell/scan, BusPirate (rides on jtag_core, so covered
+// by jtag_is_inited()), serprog (bit-bangs raw GPIO with no jtag/swd
+// flag of its own — needs its own check), and UART passthrough (owns
+// UART0 on CH0/CH1). Every entry point below (`scan jtag`, `scan swd`,
+// `buspirate enter`, `serprog enter`, `uart enter`) must route through
+// this single check so a new consumer can't silently skip a neighbour.
+static bool shell_bus_busy(const char* prefix) {
     if (jtag_is_inited()) {
-        shell_print("SCAN: ERR jtag_in_use (run `jtag deinit` first)\n");
-        return;
+        shell_printf("%s: ERR jtag_in_use (run `jtag deinit` first)\n", prefix);
+        return true;
     }
     if (swd_shell_inited) {
-        shell_print("SCAN: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
+        shell_printf("%s: ERR swd_in_use (run `swd deinit` first)\n", prefix);
+        return true;
     }
+    if (s_shell_mode == SHELL_MODE_SERPROG) {
+        shell_printf("%s: ERR serprog_in_use (run `serprog exit` first)\n", prefix);
+        return true;
+    }
+    if (uart_passthrough_is_enabled()) {
+        shell_printf("%s: ERR uart_in_use (run `uart exit` first)\n", prefix);
+        return true;
+    }
+    return false;
+}
+
+static FW_WIP_UNUSED void cmd_scan_jtag(void) {
+    if (shell_bus_busy("SCAN"))
+        return;
     shell_printf("SCAN: starting JTAG pinout scan over %u channels (P(%u,%u)=%lu)\n",
                  PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_JTAG_PINS,
                  (unsigned long)PINOUT_SCANNER_JTAG_TOTAL);
@@ -506,22 +571,20 @@ static FW_WIP_UNUSED void cmd_scan_jtag(void) {
 }
 
 static void cmd_scan_swd(int argc, char** argv) {
-    if (jtag_is_inited()) {
-        shell_print("SCAN: ERR jtag_in_use (run `jtag deinit` first)\n");
+    if (shell_bus_busy("SCAN"))
         return;
-    }
-    if (swd_shell_inited) {
-        shell_print("SCAN: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
-    }
 
     shell_printf("SCAN: starting SWD pinout scan over %u channels "
                  "(P(%u,%u)=%u) targetsel_compat=0x%08lX\n",
                  PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_CHANNELS, PINOUT_SCANNER_SWD_PINS,
                  PINOUT_SCANNER_SWD_TOTAL);
     pinout_scan_swd_result_t r;
-    bool found = pinout_scan_swd(&r, scan_yield_progress);
-    if (!found) {
+    pinout_scan_swd_status_t status = pinout_scan_swd(&r, scan_yield_progress);
+    if (status == PINOUT_SCAN_SWD_BUS_BUSY) {
+        shell_print("SCAN: ERR bus_busy (SWD bus held by another service)\n");
+        return;
+    }
+    if (status != PINOUT_SCAN_SWD_MATCH) {
         shell_print("SCAN: swd NO_MATCH (no OK DPIDR found)\n");
         return;
     }
@@ -597,14 +660,8 @@ static void process_buspirate_subcmd(int argc, char** argv) {
         shell_print("BPIRATE: ERR usage: buspirate enter [<tdi> <tdo> <tms> <tck>]\n");
         return;
     }
-    if (jtag_is_inited()) {
-        shell_print("BPIRATE: ERR jtag_in_use (run `jtag deinit` first)\n");
+    if (shell_bus_busy("BPIRATE"))
         return;
-    }
-    if (swd_shell_inited) {
-        shell_print("BPIRATE: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
-    }
     bool explicit_pins = (argc >= 6);
     jtag_pinout_t p    = {
            .tdi  = explicit_pins ? (uint8_t)strtoul(argv[2], NULL, 0) : BOARD_GP_SCANNER_CH0,
@@ -711,14 +768,8 @@ static void process_serprog_subcmd(int argc, char** argv) {
         shell_print("SERPROG: ERR usage: serprog enter [<cs> <mosi> <miso> <sck>]\n");
         return;
     }
-    if (jtag_is_inited()) {
-        shell_print("SERPROG: ERR jtag_in_use (run `jtag deinit` first)\n");
+    if (shell_bus_busy("SERPROG"))
         return;
-    }
-    if (swd_shell_inited) {
-        shell_print("SERPROG: ERR swd_in_use (run `swd deinit` first)\n");
-        return;
-    }
     bool explicit_pins = (argc >= 6);
     s_sp_pin_cs        = explicit_pins ? (uint8_t)strtoul(argv[2], NULL, 0) : BOARD_GP_SCANNER_CH0;
     s_sp_pin_mosi      = explicit_pins ? (uint8_t)strtoul(argv[3], NULL, 0) : BOARD_GP_SCANNER_CH1;
@@ -744,6 +795,183 @@ static void process_serprog_subcmd(int argc, char** argv) {
     shell_print("SERPROG: ready for `flashrom -p serprog:dev=/dev/ttyACM<N>`\n");
     shell_print("SERPROG: exit by closing the host port (DTR drop is detected)\n");
     s_shell_mode = SHELL_MODE_SERPROG;
+}
+
+// -----------------------------------------------------------------------------
+// uart_passthrough — CDC3 ("Target UART") ↔ scanner-header UART0
+// bridge. Unlike buspirate/serprog, control happens on CDC2's normal
+// text shell (`uart enter/baud/parity/stopbits/exit/status`) while
+// data flows separately on CDC3 — no shell-mode takeover needed.
+// -----------------------------------------------------------------------------
+
+// --- RX diagnostics (temporary — remove once the RX path is proven) --------
+static volatile uint32_t s_dbg_fwd;     // bytes the pump handed to this cb
+static volatile uint32_t s_dbg_cdc_acc; // bytes the host CDC actually accepted
+
+static void uart_write_byte_cb(uint8_t b, void* u) {
+    (void)u;
+    s_dbg_fwd++;
+    s_dbg_cdc_acc += (uint32_t)usb_composite_cdc_write(USB_CDC_TARGET, &b, 1);
+}
+
+static const uart_passthrough_callbacks_t UART_CALLBACKS = {
+    .write_byte = uart_write_byte_cb,
+    .user       = NULL,
+};
+
+static const char* uart_parity_label(hal_uart_parity_t p) {
+    switch (p) {
+        case HAL_UART_PARITY_EVEN:
+            return "E";
+        case HAL_UART_PARITY_ODD:
+            return "O";
+        default:
+            return "N";
+    }
+}
+
+static bool uart_parse_parity(const char* s, hal_uart_parity_t* out) {
+    if (!strcmp(s, "n") || !strcmp(s, "N")) {
+        *out = HAL_UART_PARITY_NONE;
+        return true;
+    }
+    if (!strcmp(s, "e") || !strcmp(s, "E")) {
+        *out = HAL_UART_PARITY_EVEN;
+        return true;
+    }
+    if (!strcmp(s, "o") || !strcmp(s, "O")) {
+        *out = HAL_UART_PARITY_ODD;
+        return true;
+    }
+    return false;
+}
+
+static void process_uart_subcmd(int argc, char** argv) {
+    if (argc < 2) {
+        shell_print("UART: ERR uart needs subcommand (try `?`)\n");
+        return;
+    }
+    const char* sub = argv[1];
+
+    if (!strcmp(sub, "enter")) {
+        if (shell_bus_busy("UART"))
+            return;
+        hal_uart_config_t cfg = {
+            .baudrate  = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 115200u,
+            .data_bits = 8u,
+            .stop_bits = (argc >= 5) ? (uint8_t)strtoul(argv[4], NULL, 0) : 1u,
+            .parity    = HAL_UART_PARITY_NONE,
+        };
+        if (argc >= 4 && !uart_parse_parity(argv[3], &cfg.parity)) {
+            shell_print("UART: ERR usage: uart enter [<baud> <n|e|o> <1|2>]\n");
+            return;
+        }
+        if (!uart_passthrough_enable(cfg, &UART_CALLBACKS)) {
+            shell_print("UART: ERR busy (scanner-header bus held by another service)\n");
+            return;
+        }
+        shell_printf("UART: OK enabled baud=%lu parity=%s stopbits=%u on CH0(TX)/CH1(RX)\n",
+                     (unsigned long)cfg.baudrate, uart_parity_label(cfg.parity), cfg.stop_bits);
+        shell_print("UART: connect to the Target UART CDC for passthrough traffic\n");
+        return;
+    }
+    if (!strcmp(sub, "exit")) {
+        uart_passthrough_disable();
+        shell_print("UART: OK disabled\n");
+        return;
+    }
+    if (!strcmp(sub, "status")) {
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: disabled\n");
+            return;
+        }
+        hal_uart_config_t cfg = uart_passthrough_get_config();
+        shell_printf("UART: enabled baud=%lu parity=%s stopbits=%u\n", (unsigned long)cfg.baudrate,
+                     uart_parity_label(cfg.parity), cfg.stop_bits);
+        return;
+    }
+    if (!strcmp(sub, "baud")) {
+        if (argc < 3) {
+            shell_print("UART: ERR usage: uart baud <n>\n");
+            return;
+        }
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: ERR not_enabled (run `uart enter` first)\n");
+            return;
+        }
+        uart_passthrough_set_baud(strtoul(argv[2], NULL, 0));
+        shell_print("UART: OK baud updated\n");
+        return;
+    }
+    if (!strcmp(sub, "parity")) {
+        hal_uart_parity_t parity;
+        if (argc < 3 || !uart_parse_parity(argv[2], &parity)) {
+            shell_print("UART: ERR usage: uart parity <n|e|o>\n");
+            return;
+        }
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: ERR not_enabled (run `uart enter` first)\n");
+            return;
+        }
+        uart_passthrough_set_parity(parity);
+        shell_print("UART: OK parity updated\n");
+        return;
+    }
+    if (!strcmp(sub, "stopbits")) {
+        if (argc < 3) {
+            shell_print("UART: ERR usage: uart stopbits <1|2>\n");
+            return;
+        }
+        if (!uart_passthrough_is_enabled()) {
+            shell_print("UART: ERR not_enabled (run `uart enter` first)\n");
+            return;
+        }
+        uart_passthrough_set_stop_bits((uint8_t)strtoul(argv[2], NULL, 0));
+        shell_print("UART: OK stopbits updated\n");
+        return;
+    }
+    shell_printf("UART: ERR unknown_subcmd: %s (try `?`)\n", sub);
+}
+
+static void pump_uart_passthrough(void) {
+    bool enabled = uart_passthrough_is_enabled();
+    if (enabled) {
+        uint8_t buf[64];
+        size_t n = usb_composite_cdc_read(USB_CDC_TARGET, buf, sizeof(buf));
+        uart_passthrough_pump(buf, n);
+    }
+
+    // --- temporary RX diagnostics, dumped to CDC2 once per second ----------
+    // Heartbeat ALWAYS emits so `en=0` is visible. The bridge tears down
+    // whenever the Target CDC (CDC3) drops DTR (see the disconnect handler
+    // in the main loop), so closing the picocom on the target port disables
+    // it — you'd then see nothing here on the old build. Watch on the
+    // Scanner CDC (IF 0x04):
+    //   IN  — did the byte reach UART0's RX FIFO at all, and was it clean?
+    //         `rxpin` is the live GP1 level — a UART RX MUST idle at 1.
+    //   OUT — did we forward it and did CDC3 (Target UART) accept it?
+    static uint32_t last_dbg_ms;
+    uint32_t now = hal_now_ms();
+    if (now - last_dbg_ms < 1000u)
+        return;
+    last_dbg_ms = now;
+    if (!enabled) {
+        diag_printf("UARTDBG: en=0 (bridge disabled — run `uart enter` and keep the "
+                    "Target UART CDC open; closing it tears the bridge down)\n");
+        return;
+    }
+    hal_uart_rx_diag_t d;
+    hal_uart_get_rx_diag(&d);
+    diag_printf("UARTDBG-IN: en=1 rxpin=%lu fsel_tx=%lu fsel_rx=%lu cr=0x%03lX "
+                "lcr=0x%02lX fr=0x%03lX rd=%lu fe=%lu pe=%lu be=%lu oe=%lu\n",
+                (unsigned long)d.rx_level, (unsigned long)d.func_tx, (unsigned long)d.func_rx,
+                (unsigned long)d.cr, (unsigned long)d.lcr_h, (unsigned long)d.fr,
+                (unsigned long)d.bytes_read, (unsigned long)d.err_framing,
+                (unsigned long)d.err_parity, (unsigned long)d.err_break,
+                (unsigned long)d.err_overrun);
+    diag_printf("UARTDBG-OUT: tgt_conn=%d fwd=%lu cdc_acc=%lu tx_dropped=%lu\n",
+                (int)usb_composite_cdc_connected(USB_CDC_TARGET), (unsigned long)s_dbg_fwd,
+                (unsigned long)s_dbg_cdc_acc, (unsigned long)uart_passthrough_get_tx_dropped());
 }
 
 // -----------------------------------------------------------------------------
@@ -1084,6 +1312,10 @@ static void process_shell_line(char* line) {
         process_serprog_subcmd(argc, argv);
         return;
     }
+    if (!strcmp(argv[0], "uart")) {
+        process_uart_subcmd(argc, argv);
+        return;
+    }
     // F11 release: the JTAG sub-shell and the direct-SWD sub-shell are
     // WIP and hidden from the public surface. The cmd_* implementations
     // + service_jtag + service_swd stay compiled in (so v3.1 can re-
@@ -1322,6 +1554,7 @@ int main(void) {
     bool last_arm             = false;
     bool last_pulse           = false;
     bool last_scanner_conn    = false;
+    bool last_target_conn     = false;
     uint32_t last_snapshot_ms = 0;
 
     while (true) {
@@ -1330,6 +1563,7 @@ int main(void) {
         pump_emfi_cdc();
         pump_crowbar_cdc();
         pump_shell_cdc();
+        pump_uart_passthrough();
         emfi_campaign_tick();
         crowbar_campaign_tick();
         campaign_manager_tick();
@@ -1353,6 +1587,16 @@ int main(void) {
             }
         }
         last_scanner_conn = conn;
+
+        // Target UART CDC disconnect (DTR drop) while passthrough is
+        // live → release the scanner-header bus the same way a
+        // crashed buspirate/serprog session is torn down above; the
+        // operator has no in-band exit byte on this raw byte pipe.
+        bool target_conn = usb_composite_cdc_connected(USB_CDC_TARGET);
+        if (last_target_conn && !target_conn && uart_passthrough_is_enabled()) {
+            uart_passthrough_disable();
+        }
+        last_target_conn = target_conn;
 
         bool arm   = ui_buttons_is_pressed(UI_BTN_ARM);
         bool pulse = ui_buttons_is_pressed(UI_BTN_PULSE);
@@ -1395,8 +1639,13 @@ int main(void) {
         // pico-sdk is a busy-wait that does NOT service tud_task, so
         // Windows SETUPs arriving during that 20 ms window pile up
         // and trigger Code 43 / DEVICE_DESCRIPTOR_FAILURE.
+        // Also pump the UART passthrough here so the 16-byte RX FIFO
+        // is drained every 1 ms instead of once per 20 ms iteration —
+        // at the bridge's higher baud rates a full 20 ms gap can
+        // overrun the FIFO before pump_uart_passthrough() above runs again.
         for (uint32_t i = 0; i < BUTTON_POLL_PERIOD_MS; i++) {
             usb_composite_task();
+            pump_uart_passthrough();
             hal_busy_wait_us(1000);
         }
     }

@@ -180,6 +180,7 @@ function(faultycat_add_service_pinout_test name)
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_phy.c
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_dp.c
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_mem.c
+        ${CMAKE_SOURCE_DIR}/services/swd_bus_lock/swd_bus_lock.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake)
     target_include_directories(${name} PRIVATE
@@ -187,6 +188,7 @@ function(faultycat_add_service_pinout_test name)
         ${CMAKE_SOURCE_DIR}/services/pinout_scanner
         ${CMAKE_SOURCE_DIR}/services/jtag_core
         ${CMAKE_SOURCE_DIR}/services/swd_core
+        ${CMAKE_SOURCE_DIR}/services/swd_bus_lock
     )
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
@@ -257,6 +259,26 @@ function(faultycat_add_service_campaign_test name)
 endfunction()
 
 faultycat_add_service_campaign_test(test_campaign_manager)
+
+# uart_passthrough — CDC3 <-> scanner-header UART0 byte bridge.
+# Depends on swd_bus_lock since enable/disable claim the shared
+# scanner-header bus.
+function(faultycat_add_service_uart_passthrough_test name)
+    add_executable(${name}
+        ${name}.c
+        ${CMAKE_SOURCE_DIR}/services/uart_passthrough/uart_passthrough.c
+        ${CMAKE_SOURCE_DIR}/services/swd_bus_lock/swd_bus_lock.c
+    )
+    target_link_libraries(${name} PRIVATE unity hal_fake)
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/drivers/include
+        ${CMAKE_SOURCE_DIR}/services/uart_passthrough
+        ${CMAKE_SOURCE_DIR}/services/swd_bus_lock
+    )
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+faultycat_add_service_uart_passthrough_test(test_uart_passthrough)
 
 # F9-4 — campaign_proto (host_proto helpers shared by emfi/crowbar)
 function(faultycat_add_service_campaign_proto_test name)

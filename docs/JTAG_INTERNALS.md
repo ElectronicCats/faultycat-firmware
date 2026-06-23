@@ -11,9 +11,8 @@ For the high-level service tree see
 > **F11 release cut (2026-05-19):** every JTAG verb (`jtag
 > init/deinit/reset/trst/chain/idcode`) plus `scan jtag` is gated as
 > WIP in this release. The firmware shell answers
-> `JTAG: ERR wip` / `SCAN: ERR wip` and the host-tool surface (CLI
-> `faultycmd scanner jtag-*`, `scanner scan-jtag`, TUI Scanner modal
-> JTAG pages) is removed. **The service-layer code documented in
+> `JTAG: ERR wip` / `SCAN: ERR wip` and the equivalent host-tool
+> surface is removed. **The service-layer code documented in
 > this file is not modified** — `services/jtag_core`,
 > `services/pinout_scanner`, `services/buspirate_compat` and
 > `services/flashrom_serprog` remain compiled in and the

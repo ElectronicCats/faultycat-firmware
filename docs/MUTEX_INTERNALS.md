@@ -429,26 +429,17 @@ for emfi and `b"F5"` for crowbar.
   too-small buffer = 0.
 - Constants self-check (CMD numbers + payload sizes).
 
-## 5. Reference host client (`faultycmd campaign`)
+## 5. Host polling timing — STATUS/DRAIN gap
 
-The click+Rich CLI under `host/faultycmd-py/` (entry point
-`faultycmd campaign`) is the authoritative host implementation of
-the F9-4 wire protocol. Subcommands `ping/configure/start/stop/
-status/drain/watch` mirror the firmware-side opcodes.
-
-Axis syntax for `configure`: `START:END:STEP` (each int) or `START`
-(collapses the axis to one value via step=0). Engine is selected
-with `--engine emfi` or `--engine crowbar`; the CLI resolves the
-right CDC via `faultycmd.usb.cdc_for`.
-
-The watch loop has a documented 30 ms gap between STATUS and DRAIN
-requests in each iteration (`CampaignClient.watch(..., gap_ms=30)`
-in `protocols/campaign.py`). Without it the firmware's executor-
-wait-loop + pump-driven dispatch occasionally orders the two
-replies in a way the host's read window misses the drain bytes.
-30 ms is well below a useful poll period and removes the race in
-practice; long-term cleanup belongs in a future async refactor of
-the executor.
+A host polling this protocol must leave a gap of at least ~30 ms
+between a `STATUS` request and the following `DRAIN` request in the
+same poll iteration. Without it, the firmware's executor-wait-loop +
+pump-driven dispatch can occasionally order the two replies such that
+a tightly-spaced host read window misses the drain bytes. 30 ms is
+well below a useful poll period in practice, so this is a cheap
+tolerance for any client to build in; a future async refactor of the
+executor on the firmware side is expected to remove the need for it
+entirely.
 
 ## 6. Mutual exclusion contract — full picture (F8 + F9)
 
@@ -486,8 +477,8 @@ Per `apps/faultycat_fw/faultycat.uf2` from `rewrite/v3` HEAD:
 |---|---|
 | USB enumeration (1209:fa17, 4×CDC) | ✓ |
 | `campaign demo crowbar` shell command (F9-3 path) | ✓ 6/6 streamed |
-| `campaign_client.py configure → start → watch` (F9-4/F9-5 path, 6 steps) | ✓ 6/6 streamed |
-| `campaign_client.py` 8-step variant | ✓ 8/8 streamed |
+| Host reference client: configure → start → watch (F9-4/F9-5 path, 6 steps) | ✓ 6/6 streamed |
+| Host reference client: 8-step variant | ✓ 8/8 streamed |
 | Mutex acquired/released per step (no deadlock) | ✓ |
 | Result ringbuffer drain via host_proto binary | ✓ |
 | F4 EMFI ping regression | ✓ `PONG F4` |
@@ -518,9 +509,8 @@ Per `apps/faultycat_fw/faultycat.uf2` from `rewrite/v3` HEAD:
   flags divergence in `verify_status`.
 - **Async executor**: split `campaign_executor_*` so it doesn't park
   dispatch against itself during the engine wait loop. Cleans up
-  the 30 ms gap currently needed in `campaign_client.py watch`.
+  the 30 ms STATUS/DRAIN gap currently needed by host clients (see
+  §5).
 - **Scanner adopts the mutex**: `pinout_scan_jtag/swd` calls
   `swd_bus_acquire(SCANNER)` per candidate so a campaign-vs-scanner
   race (today only reachable by clever scripting) is well-defined.
-- **F10 — faultycmd-rs**: replaces `tools/{emfi,crowbar,campaign}_
-  client.py` with a Rust workspace + ratatui TUI dashboard.

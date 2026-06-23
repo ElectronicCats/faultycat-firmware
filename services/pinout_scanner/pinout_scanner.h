@@ -29,6 +29,13 @@
 // the soft-lock is re-checkable. The shell-level soft-lock that
 // F8-1 added between SWD and JTAG still applies — `scan` refuses
 // if either swd_phy or jtag_core is currently held.
+//
+// pinout_scan_swd additionally holds the service-layer SWD bus
+// mutex (services/swd_bus_lock) as SWD_BUS_OWNER_SCANNER for the
+// whole sweep, so a concurrent campaign verify hook or a DAPLink
+// host can't interleave SWD transactions with the scan. Acquired
+// with try_acquire — if the bus is already held, the scan fails
+// fast (returns false) instead of blocking the shell.
 
 #define PINOUT_SCANNER_CHANNELS  8u
 #define PINOUT_SCANNER_JTAG_PINS 4u
@@ -69,12 +76,25 @@ typedef void (*pinout_scanner_progress_cb)(uint32_t cur, uint32_t total);
 // with both jtag_core and swd_phy in the deinit state.
 bool pinout_scan_jtag(pinout_scan_jtag_result_t* out, pinout_scanner_progress_cb cb);
 
-// Run an SWD pinout scan. Returns true on the first OK DPIDR read
-// that passes swd_dp_dpidr_is_valid() and repeats consistently. The
+// Outcome of an SWD pinout scan. Distinguishes "swept every
+// permutation, none matched" from "never swept — the SWD bus mutex
+// was already held by another service" so the shell can report the
+// right reason instead of a blanket NO_MATCH.
+typedef enum {
+    PINOUT_SCAN_SWD_NO_MATCH = 0,
+    PINOUT_SCAN_SWD_MATCH,
+    PINOUT_SCAN_SWD_BUS_BUSY,
+} pinout_scan_swd_status_t;
+
+// Run an SWD pinout scan. Returns PINOUT_SCAN_SWD_MATCH on the first
+// OK DPIDR read that passes swd_dp_dpidr_is_valid() and repeats
+// consistently. Returns PINOUT_SCAN_SWD_BUS_BUSY without sweeping if
+// the service-layer SWD bus mutex is already held elsewhere. The
 // targetsel parameter is retained for callers that still track
 // multidrop targets; scan discovery itself uses swd_dp_bus_detect()
 // and does not issue TARGETSEL.
-bool pinout_scan_swd(pinout_scan_swd_result_t* out, pinout_scanner_progress_cb cb);
+pinout_scan_swd_status_t pinout_scan_swd(pinout_scan_swd_result_t* out,
+                                         pinout_scanner_progress_cb cb);
 
 // -----------------------------------------------------------------------------
 // Pure permutation iterator — exposed for tests.

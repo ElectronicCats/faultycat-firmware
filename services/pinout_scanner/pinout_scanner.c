@@ -26,6 +26,7 @@
 
 #include "board_v2.h"
 #include "jtag_core.h"
+#include "swd_bus_lock.h"
 #include "swd_dp.h"
 #include "swd_phy.h"
 
@@ -185,15 +186,23 @@ bool pinout_scan_jtag(pinout_scan_jtag_result_t* out, pinout_scanner_progress_cb
 // SWD scan
 // -----------------------------------------------------------------------------
 
-bool pinout_scan_swd(pinout_scan_swd_result_t* out, pinout_scanner_progress_cb cb) {
+pinout_scan_swd_status_t pinout_scan_swd(pinout_scan_swd_result_t* out,
+                                         pinout_scanner_progress_cb cb) {
     if (out == NULL)
-        return false;
+        return PINOUT_SCAN_SWD_NO_MATCH;
+    // Service-layer SWD bus mutex (services/swd_bus_lock) — held for
+    // the whole sweep so a concurrent campaign verify hook or a
+    // DAPLink host can't interleave SWD transactions with the scan.
+    // try_acquire: fail fast rather than block the shell if busy.
+    if (!swd_bus_try_acquire(SWD_BUS_OWNER_SCANNER))
+        return PINOUT_SCAN_SWD_BUS_BUSY;
 
     memset(out, 0, sizeof(*out));
 
     pinout_perm_iter_t it;
     pinout_perm_init(&it, PINOUT_SCANNER_SWD_PINS, PINOUT_SCANNER_CHANNELS);
 
+    bool found   = false;
     uint32_t cur = 0u;
     while (pinout_perm_next(&it)) {
         if (cb != NULL)
@@ -235,10 +244,12 @@ bool pinout_scan_swd(pinout_scan_swd_result_t* out, pinout_scanner_progress_cb c
                 out->dpidr = baseline;
                 //out->targetsel = targetsel;
                 swd_phy_deinit();
-                return true;
+                found = true;
+                break;
             }
         }
         swd_phy_deinit();
     }
-    return false;
+    swd_bus_release(SWD_BUS_OWNER_SCANNER);
+    return found ? PINOUT_SCAN_SWD_MATCH : PINOUT_SCAN_SWD_NO_MATCH;
 }

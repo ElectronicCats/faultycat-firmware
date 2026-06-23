@@ -1,16 +1,20 @@
 # FaultyCat releases — versioning, build, distribution
 
-This document describes how the FaultyCat firmware (RP2040 UF2) and
-the matching host package (`faultycmd` CLI + TUI) are versioned,
-built, and shipped. It covers:
+This document describes how the FaultyCat firmware (RP2040 UF2) is
+versioned, built, and shipped. It covers:
 
   - the version scheme used by the project (`vX.Y.Z.W`),
   - where the version lives in the source tree and how it propagates
     into the running firmware,
-  - the wire-protocol fields the host uses to check parity with the
-    flashed firmware,
-  - how to cut a release as a maintainer,
-  - how to install a specific release as an end user.
+  - the wire-protocol fields a host tool can use to check parity with
+    the flashed firmware,
+  - how to cut a firmware release as a maintainer,
+  - how to flash a specific release as an end user.
+
+The host tool (CLI/TUI) that talks to this firmware now lives in a
+separate repository and has its own versioning and release process;
+it is not covered here beyond the wire-protocol version fields the
+firmware exposes for any host tool to consume.
 
 ---
 
@@ -22,35 +26,28 @@ append a hyphen-suffix (`v3.0.0.0-rc1`).
 
 | Segment | Bumped when… |
 |---|---|
-| MAJOR | Incompatible wire-protocol change (PING reply shape, opcode renumbering, CDC interface re-layout). Operators must re-flash + reinstall together. |
-| MINOR | New protocol command or new host subcommand that the firmware also gained; remains backwards-compatible at the *transport* level (old host can still PING new firmware) but the host's Exact-match gate refuses the pairing anyway. |
+| MAJOR | Incompatible wire-protocol change (PING reply shape, opcode renumbering, CDC interface re-layout). Operators must re-flash and update any host tool together. |
+| MINOR | New protocol command that the firmware gained; remains backwards-compatible at the *transport* level (an old host tool can still PING new firmware) but an Exact-match version gate on the host side would refuse the pairing anyway. |
 | PATCH | Bug fix or polish that does not add or remove protocol surface. |
 | TWEAK | Reserved for hotfixes-of-patch and for distinguishing identical-looking re-spins (e.g. a CI re-run that produced a different binary). |
 
-The Exact-match policy below means the host and firmware must agree
-on **all four** segments. The four-segment shape gives a release the
-flexibility to ship a host-only patch or a firmware-only patch
+An Exact-match policy (host tool must agree with firmware on **all
+four** segments) is the recommended pairing check for any host tool
+talking to this firmware — see "Host-side parity gate" below for the
+fields the firmware exposes to support that check. The four-segment
+shape gives a release the flexibility to ship a firmware-only patch
 without bumping the user-visible MAJOR/MINOR.
 
-Wheel and sdist filenames carry the bare semver per PEP 440
-(`faultycmd-3.0.0.0-py3-none-any.whl`); the `v` prefix is preserved
-in everything user-facing (git tag, UF2 filename, GitHub release
-title, artifact name in CI).
+The `v` prefix is preserved in everything user-facing (git tag, UF2
+filename, GitHub release title, artifact name in CI).
 
 ## Where the version lives in the source tree
 
-Three places carry the version literal. The release workflow
+`CMakeLists.txt`'s `project(faultycat VERSION X.Y.Z.W ...)` is the
+single source of truth on the firmware side. The release workflow
 (`.github/workflows/release.yml`) and the local helper
-(`scripts/get_build.sh`) both rewrite all three on every tag.
-
-| File | Literal | Constraint |
-|---|---|---|
-| `CMakeLists.txt` | `project(faultycat VERSION X.Y.Z.W ...)` | CMake's `project()` accepts up to 4 numeric components, rejects the `v` prefix and pre-release suffix. |
-| `host/faultycmd-py/pyproject.toml` | `version = "X.Y.Z.W"` | PEP 440 accepts a 4-segment release version, rejects the `v` prefix. |
-| `host/faultycmd-py/src/faultycmd/__init__.py` | `__version__ = "X.Y.Z.W"` | Mirrored from pyproject so `faultycmd.__version__` is reachable without importing `importlib.metadata`. |
-
-CMake's `project(VERSION ...)` is the single source of truth on the
-firmware side. The top-level CMakeLists.txt then runs
+(`scripts/get_build.sh`) rewrite this literal on every tag. The
+top-level CMakeLists.txt then runs
 `configure_file(cmake/firmware_version.h.in ...)` to generate
 `firmware_version.h`:
 
@@ -130,91 +127,50 @@ the first three segments without re-opening any of the CDC ports.
 
 ## Host-side parity gate
 
-`faultycmd.version_check` is the small module that compares the
-firmware's reported version against `faultycmd.__version__`. The
-policy is **Exact**: every one of the four segments must match.
-Patches and tweaks count; if the firmware and host disagree on any
-segment, the host refuses to operate.
+Any host tool talking to this firmware should compare the firmware's
+reported version (via PING, the `version` shell command, or
+`bcdDevice`) against its own version and refuse to operate on a
+mismatch — see "How the firmware advertises its version to the
+host" above for the exact fields available. The recommended policy
+is **Exact**: every one of the four segments should match, since a
+mismatched pairing in field use is almost always a half-applied
+upgrade and can produce silently-wrong results if the wire protocol
+drifted. Implementation of that check (escape hatches for
+development, error UX, etc.) is the host tool's responsibility and
+lives in its own repository.
 
-Every protocol client (`EmfiClient`, `CrowbarClient`, `CampaignClient`,
-`ScannerClient`) runs the probe in its `open()` method. A mismatch
-raises `VersionMismatchError` and closes the underlying serial port
-so the caller never holds a half-open client. The CLI maps the
-exception to exit code `3` and prints a styled message; the TUI
-shows it via `App.notify()` and renders a red `✗` in the header
-subtitle.
-
-Two escape hatches:
-
-  - `faultycmd --ignore-version-mismatch <subcommand>` flips a global
-    flag the version_check module consults; the open() still probes
-    and stores the firmware version (so the TUI can still display
-    "mismatch — override active"), but the assertion is skipped.
-  - Test code passes `check_firmware_version=False` when constructing
-    a client with a `FakeSerial` factory. Production code paths
-    (`EmfiClient.discover()` etc. used by the CLI and TUI) always
-    enable the check.
-
-The override is intentional. It lets a developer iterate on a
-hand-built UF2 against a hand-built host package without needing to
-re-tag the repo for every smoke test. It is **not** intended for
-end users — a mismatched pairing in field use is almost always a
-half-applied upgrade and produces silently-wrong results if the wire
-protocol drifted.
-
-## Cutting a release (maintainer guide)
+## Cutting a firmware release (maintainer guide)
 
 The release workflow lives at `.github/workflows/release.yml`. It
 fires on every tag matching `v*.*.*.*` (and `v*.*.*.*-*` for
-pre-releases). Three jobs run, in two parallel + one downstream:
+pre-releases).
 
-### `build` (ubuntu-24.04) — UF2 + wheel + sdist
+### `build` (ubuntu-24.04) — UF2
 
   1. Validates the tag shape and rejects malformed tags up-front so a
      typo doesn't ship a broken release.
   2. Installs the cross-compile toolchain (`gcc-arm-none-eabi`,
      `libnewlib-arm-none-eabi`, `libstdc++-arm-none-eabi-newlib`,
-     `cmake`, `ninja`) and the Python build backend.
+     `cmake`, `ninja`).
   3. Runs `./scripts/get_build.sh ${TAG}` which:
-       - rewrites the three version literals in the workflow checkout
+       - rewrites the version literal in the workflow checkout
          (NOT committed back to `main`),
        - re-runs `cmake --preset fw-release` so `firmware_version.h`
          is regenerated with `PROJECT_VERSION_*` matching the tag,
        - builds the firmware (`build/fw-release/apps/faultycat_fw/faultycat.uf2`),
-       - builds the host sdist + wheel via `python -m build`,
        - copies the UF2 to
-         `build/apps/faultycat_fw/faultycat_${TAG}.uf2` and the host
-         distributions to the same directory.
+         `build/apps/faultycat_fw/faultycat_${TAG}.uf2`.
   4. Uploads `build/apps/faultycat_fw/` as artifact
      `faultycat-release-${TAG}`.
 
-### `build-windows-exe` (windows-latest) — standalone `.exe`
-
-Runs in parallel with `build`. Bumps the same Python version literals
-(skipping CMakeLists, since this job doesn't build firmware), installs
-`pyinstaller` via the `[build-binary]` extra, then produces a
-single-file `faultycmd.exe` with:
-
-```text
-pyinstaller --name faultycmd --onefile -p src \
-  --collect-all faultycmd --collect-all textual \
-  --collect-all rich --collect-all click \
-  src/faultycmd/__main__.py
-```
-
-The resulting `.exe` is renamed `faultycmd_${TAG}.exe` and uploaded as
-artifact `faultycmd-windows-${TAG}`. It bundles Python + every host
-dependency (~30-50 MB) so the end user doesn't need a Python install
-on Windows — they download the `.exe`, drop it anywhere, and run it.
-
 ### `release` (ubuntu-24.04) — publish draft
 
-`needs: [build, build-windows-exe]`. Downloads both artifacts to
-`./release/`, then publishes a **draft** GitHub Release with every
-file attached. `generateReleaseNotes: true` pulls the changelog from
-PRs and commits since the previous tag; an additional "Highlights"
-section in the body lists the filtered `feat/fix/perf/refactor/ci`
-commits since the previous non-suffix tag.
+Downloads the build artifact to `./release/`, then publishes a
+**draft** GitHub Release with the UF2 attached. `generateReleaseNotes:
+true` pulls the changelog from PRs and commits since the previous
+tag; an additional "Highlights" section in the body lists the
+filtered `feat/fix/perf/refactor/ci` commits since the previous
+non-suffix tag.
 
 The release is created as a draft so the maintainer reviews it, edits
 the notes if needed, and clicks publish manually.
@@ -223,11 +179,9 @@ the notes if needed, and clicks publish manually.
 
 ```bash
 git checkout main
-# Optional: bump the literals locally for repo consistency — not
-# required, the workflow re-bumps them defensively during the build.
+# Optional: bump the literal locally for repo consistency — not
+# required, the workflow re-bumps it defensively during the build.
 sed -i -E 's/^(\s*VERSION\s+)[0-9.]+/\13.0.1.0/' CMakeLists.txt
-sed -i -E 's/^(version = )"[^"]+"/\1"3.0.1.0"/' host/faultycmd-py/pyproject.toml
-sed -i -E 's/^(__version__ = )"[^"]+"/\1"3.0.1.0"/' host/faultycmd-py/src/faultycmd/__init__.py
 git commit -am "chore(release): bump to 3.0.1.0"
 
 git tag v3.0.1.0
@@ -241,9 +195,9 @@ when it goes green a new draft release appears under
 the draft, sanity-check the auto-generated notes, then publish.
 
 This project mirrors Minino's pattern of **not** committing the
-workflow's defensive bump back to `main`. That means the literals in
-`main` reflect the last *manually* committed bump, which may lag the
-latest tag. Use the optional `sed` block above to keep them in sync
+workflow's defensive bump back to `main`. That means the literal in
+`main` reflects the last *manually* committed bump, which may lag the
+latest tag. Use the optional `sed` block above to keep it in sync
 with each tag.
 
 ### Dry-running a release locally
@@ -254,8 +208,6 @@ The same script CI runs is callable from the repo root:
 ./scripts/get_build.sh v3.0.1.0
 ls build/apps/faultycat_fw/
 # faultycat_v3.0.1.0.uf2
-# faultycmd-3.0.1.0-py3-none-any.whl
-# faultycmd-3.0.1.0.tar.gz
 ```
 
 The script does the same in-place version bump CI does, so a
@@ -263,47 +215,21 @@ follow-up `git diff` shows exactly what the workflow will write into
 its checkout. Revert with:
 
 ```bash
-git checkout -- \
-  CMakeLists.txt \
-  host/faultycmd-py/pyproject.toml \
-  host/faultycmd-py/src/faultycmd/__init__.py
+git checkout -- CMakeLists.txt
 ```
 
 if the tree should stay clean.
-
-The Windows `.exe` is NOT produced by `scripts/get_build.sh` because
-PyInstaller's output is platform-specific (a Linux runner can't
-produce a Windows `.exe` without cross-compile gymnastics we
-intentionally don't run locally). The release workflow's
-`build-windows-exe` job is what builds it on a `windows-latest`
-runner. To reproduce locally on a Windows machine:
-
-```cmd
-cd host\faultycmd-py
-python -m venv .venv && .venv\Scripts\activate
-pip install -e .[build-binary]
-pyinstaller --name faultycmd --onefile -p src ^
-  --collect-all faultycmd --collect-all textual ^
-  --collect-all rich --collect-all click ^
-  src\faultycmd\__main__.py
-dist\faultycmd.exe --version
-```
 
 Pre-release tags work the same way:
 
 ```bash
 ./scripts/get_build.sh v3.1.0.0-rc1
-# faultycat_v3.1.0.0-rc1.uf2  ← suffix preserved in filenames
-# faultycmd-3.1.0.0-py3-none-any.whl  ← bare semver (no suffix)
-#                                       wheel filenames can't carry
-#                                       the suffix without PEP 440
-#                                       gymnastics; deferred.
+# faultycat_v3.1.0.0-rc1.uf2  ← suffix preserved in the filename
 ```
 
-## Installing a release (end-user guide)
+## Flashing a release (end-user guide)
 
-Each GitHub Release ships four files. Pick the firmware UF2 plus the
-host distribution that matches your platform:
+Each GitHub Release ships the firmware UF2:
 
   1. **Flash the firmware.** Hold the BOOTSEL button on the FaultyCat
      while plugging the USB cable. The board appears as a
@@ -312,67 +238,18 @@ host distribution that matches your platform:
      into the new firmware automatically and re-enumerates as
      `1209:fa17`.
 
-  2. **Install the matching host CLI/TUI.**
+  2. **Verify the firmware version**, e.g. via the CDC2 diag banner
+     or the `version` shell command:
 
-     - **On Windows:** download `faultycmd_v3.0.1.0.exe` and drop it
-       wherever is convenient — Desktop, project directory, a folder
-       already on `PATH`. The `.exe` bundles Python and every
-       dependency, so no `pip` / venv setup is needed.
-
-       From the same directory the `.exe` lives in (PowerShell or
-       `cmd.exe`), the `.\` prefix is required so the shell runs the
-       local file instead of searching `PATH`:
-
-       ```powershell
-       .\faultycmd_v3.0.1.0.exe info
-       .\faultycmd_v3.0.1.0.exe tui
-       ```
-
-       **Easier:** rename the file to something shorter
-       (e.g. `faultycmd.exe`), and the invocations become
-       `.\faultycmd.exe info`. And if you put that renamed file in a
-       folder that is already on `PATH`, you can drop the `.\` and
-       just type `faultycmd info` from anywhere.
-
-     - **On Linux / macOS, or on Windows with Python already
-       installed:**
-
-       ```bash
-       pip install faultycmd-3.0.1.0-py3-none-any.whl
-       # or, from source:
-       pip install faultycmd-3.0.1.0.tar.gz
-       ```
-
-  3. **Verify parity.**
-
-     ```bash
-     faultycmd info
-     # Expected: `firmware: v3.0.1.0 (match)`
+     ```
+     SHELL: VERSION 3.0.1.0
      ```
 
-If `faultycmd info` reports a mismatch, the most common cause is
-that you upgraded one side without the other — either re-flash the
-matching UF2 or re-install the matching wheel. The mismatch message
-includes both versions so it's clear which one needs to move.
-
-## Entry points — `faultycmd`, `python -m faultycmd`, and the `.exe`
-
-All three invocations route through `faultycmd.cli:_wrap_main` (not
-the bare `main` click group). That keeps the user-visible behaviour
-symmetric:
-
-| Invocation                         | What runs                                |
-|------------------------------------|------------------------------------------|
-| `faultycmd ...`                    | pip-installed console script, configured in `pyproject.toml` `[project.scripts]` |
-| `python -m faultycmd ...`          | `src/faultycmd/__main__.py`              |
-| `faultycmd_vX.Y.Z.W.exe ...`       | PyInstaller-frozen `__main__.py`         |
-
-The wrapper catches `VersionMismatchError` (→ exit 3),
-`EngineError` / `CampaignError` / `ScannerError` (→ exit 2 with
-styled message), and `FileNotFoundError` (→ exit 2). Anything else
-propagates as a Python traceback. Both `python -m faultycmd` and
-the standalone `.exe` are documented as Windows-friendly fallbacks
-when the user-install `Scripts/` directory is not on `PATH`.
+  3. **Pair with a compatible host tool, if you use one.** See its
+     own repository for install instructions. Confirm the host tool
+     reports an exact version match against the flashed firmware
+     before relying on it — see "Host-side parity gate" above for
+     the fields the firmware exposes for that check.
 
 ## Related files
 
@@ -380,15 +257,8 @@ when the user-install `Scripts/` directory is not on `PATH`.
 |---|---|
 | `CMakeLists.txt` | `project(... VERSION ...)` — firmware-side SSoT. |
 | `cmake/firmware_version.h.in` | Template `configure_file` fills with `PROJECT_VERSION_*`. |
-| `host/faultycmd-py/src/faultycmd/__init__.py` | `__version__` literal — host SSoT. |
-| `host/faultycmd-py/src/faultycmd/__main__.py` | `python -m faultycmd` + PyInstaller `.exe` entry. Calls `_wrap_main`. |
-| `host/faultycmd-py/src/faultycmd/cli.py` | `_wrap_main` exception wrapper + click groups. |
-| `host/faultycmd-py/src/faultycmd/version_check.py` | Host-side parse + assert + global override. |
-| `host/faultycmd-py/src/faultycmd/protocols/_base.py` | `_probe_and_check_firmware_version()` on `open()`. |
-| `host/faultycmd-py/src/faultycmd/protocols/scanner.py` | Shell-version probe for CDC2. |
-| `host/faultycmd-py/pyproject.toml` | `version = "..."` + `[project.scripts]` → `_wrap_main`. |
-| `scripts/get_build.sh` | Local + CI build wrapper (firmware UF2 + host sdist/wheel; NOT the Windows `.exe`). |
-| `.github/workflows/release.yml` | Tag-driven release workflow (`build` + `build-windows-exe` + `release` jobs). |
+| `scripts/get_build.sh` | Local + CI build wrapper for the firmware UF2. |
+| `.github/workflows/release.yml` | Tag-driven release workflow (`build` + `release` jobs). |
 | `services/host_proto/{emfi,crowbar}_proto/*.c` | 6-byte PING reply. |
 | `apps/faultycat_fw/main.c` | Diag banner + `version` shell command. |
 | `usb/src/usb_descriptors.c` | `bcdDevice` derived from `FW_VERSION_BCD`. |

@@ -13,4 +13,5 @@ target_link_libraries(service_pinout_scanner
         board_v2_header
         service_jtag
         service_swd
+        service_swd_bus_lock
 )
