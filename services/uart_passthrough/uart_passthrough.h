@@ -21,6 +21,12 @@
 // pinout_scanner/campaign_manager. `uart_passthrough_enable` fails if
 // the bus is held by another owner, mirroring the contract callers
 // already get from `swd_bus_try_acquire`.
+//
+// Target→host (UART RX) bytes are also mirrored out hal/uart_debug.h
+// (UART1 TX, GP4) for external debugging — a logic analyzer or a
+// second terminal can watch the same stream without touching the
+// CDC3 link. TX-only, best-effort: if that FIFO can't keep up the
+// mirrored bytes are dropped, but the primary host path is unaffected.
 
 typedef struct {
     void (*write_byte)(uint8_t b, void* user); // → host CDC (TX path)

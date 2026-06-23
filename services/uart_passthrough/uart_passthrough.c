@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "hal/uart_debug.h"
 #include "swd_bus_lock.h"
 
 static bool s_enabled;
@@ -26,6 +27,7 @@ bool uart_passthrough_enable(hal_uart_config_t cfg, const uart_passthrough_callb
         return false;
 
     hal_uart_init(cfg);
+    hal_uart_debug_init(cfg.baudrate);
     s_cfg            = cfg;
     s_cb             = *cb;
     s_enabled        = true;
@@ -38,6 +40,7 @@ void uart_passthrough_disable(void) {
     if (!s_enabled)
         return;
     hal_uart_deinit();
+    hal_uart_debug_deinit();
     swd_bus_release(SWD_BUS_OWNER_UART_PASSTHRU);
     s_enabled        = false;
     s_tx_pending_len = 0u;
@@ -52,6 +55,7 @@ void uart_passthrough_set_baud(uint32_t baudrate) {
         return;
     s_cfg.baudrate = baudrate;
     hal_uart_set_config(s_cfg);
+    hal_uart_debug_set_baud(baudrate);
 }
 
 void uart_passthrough_set_parity(hal_uart_parity_t parity) {
@@ -133,5 +137,10 @@ void uart_passthrough_pump(const uint8_t* from_host, size_t from_host_len) {
         for (size_t i = 0; i < n; i++) {
             s_cb.write_byte(rx_chunk[i], s_cb.user);
         }
+        // Mirror to the debug UART (UART1/GP4) for an external
+        // logic analyzer or second terminal. Best-effort: if the
+        // debug TX FIFO can't keep up, those bytes are simply lost —
+        // unlike the host path, there's no retry-staging for a tap.
+        hal_uart_debug_write(rx_chunk, n);
     }
 }
