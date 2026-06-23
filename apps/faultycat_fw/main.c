@@ -30,6 +30,7 @@
 #include "hal/uart.h"
 #include "hv_charger.h"
 #include "i2c_core.h"
+#include "i2c_la.h"
 #include "jtag_core.h"
 #include "board_v2.h"
 #include "pinout_scanner.h"
@@ -180,6 +181,8 @@ static void shell_help(void) {
     shell_print("SHELL:   scan i2c                                    P(8,2)=56 perms\n");
     shell_print(
         "SHELL:   i2c probe <sda> <scl>                       rescan addrs on known pins\n");
+    shell_print(
+        "SHELL:   i2c la <sda> <scl> <us> <n>                  capture SDA/SCL, hex dump\n");
     shell_print("SHELL: --- Campaign (F9) ---\n");
     shell_print("SHELL:   campaign status                              show state + counters\n");
     shell_print("SHELL:   campaign stop                                halt running sweep\n");
@@ -691,14 +694,67 @@ static void cmd_i2c_probe(int argc, char** argv) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// I2C passive logic analyzer — `i2c la <sda> <scl> <us> <n>` (Option A from
+// docs/I2C_LOGIC_ANALYZER_PLAN.md §"Salida sobre CDC2"): captures via
+// i2c_la_capture and hex-dumps the buffer as plain text over the existing
+// shell — no new protocol, no SHELL_MODE_* switch.
+// -----------------------------------------------------------------------------
+
+// Upper bound on the capture's blocking stall. i2c_la_capture is a
+// busy-wait loop (no async timer, no yielding — see plan §"Restricciones"
+// #2/#3), so this directly bounds how long the USB shell is unresponsive.
+#define I2C_LA_SHELL_MAX_MS 200u
+
+static void cmd_i2c_la(int argc, char** argv) {
+    if (argc < 6) {
+        shell_print("I2C: ERR usage: i2c la <sda> <scl> <us> <n>\n");
+        return;
+    }
+    if (shell_bus_busy("I2C"))
+        return;
+    uint8_t sda = (uint8_t)strtoul(argv[2], NULL, 0);
+    uint8_t scl = (uint8_t)strtoul(argv[3], NULL, 0);
+    uint32_t us = (uint32_t)strtoul(argv[4], NULL, 0);
+    uint32_t n  = (uint32_t)strtoul(argv[5], NULL, 0);
+    if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
+        shell_print("I2C: ERR bus_busy (held by another service)\n");
+        return;
+    }
+    if (!i2c_la_init(sda, scl)) {
+        shell_print("I2C: ERR init_failed (pin range or duplicate?)\n");
+        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+        return;
+    }
+    uint32_t count     = i2c_la_capture(us, n, I2C_LA_SHELL_MAX_MS);
+    const uint8_t* buf = i2c_la_buffer();
+    i2c_la_deinit();
+    swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+
+    shell_printf("I2C: LA OK sda=GP%u scl=GP%u samples=%lu interval_us=%lu\n", sda, scl,
+                 (unsigned long)count, (unsigned long)us);
+    char line[80];
+    size_t pos = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", buf[i]);
+        if (pos >= sizeof(line) - 4 || i + 1 == count) {
+            line[pos++] = '\n';
+            usb_composite_cdc_write(USB_CDC_SCANNER, line, pos);
+            pos = 0;
+        }
+    }
+}
+
 static void process_i2c_subcmd(int argc, char** argv) {
     if (argc < 2) {
-        shell_print("I2C: ERR i2c needs subcommand: probe\n");
+        shell_print("I2C: ERR i2c needs subcommand: probe, la\n");
         return;
     }
     const char* sub = argv[1];
     if (!strcmp(sub, "probe"))
         cmd_i2c_probe(argc, argv);
+    else if (!strcmp(sub, "la"))
+        cmd_i2c_la(argc, argv);
     else
         shell_printf("I2C: ERR unknown_subcmd: %s (try `?`)\n", sub);
 }
