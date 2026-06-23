@@ -22,6 +22,11 @@
 //            channels (P(8, 2) = 56 permutations); for each, swd_phy
 //            + swd_dp_bus_detect; first OK ACK with a coherent, stable
 //            DPIDR wins. The DPIDR is not matched to one MCU family.
+//   - I2C  : iterate every 2-tuple (SDA, SCL) of distinct scanner
+//            channels (P(8, 2) = 56 permutations); for each, i2c_init
+//            + i2c_bus_scan; first combination with >=1 ACKed address
+//            wins, confirmed stable across repeats (services/i2c_core,
+//            per docs/I2C_SCANNER_PLAN.md).
 //
 // Mutual-exclusion contract (F8-1 → F9). The scan acquires the
 // scanner pins by calling jtag_init / swd_phy_init in sequence.
@@ -40,11 +45,18 @@
 #define PINOUT_SCANNER_CHANNELS  8u
 #define PINOUT_SCANNER_JTAG_PINS 4u
 #define PINOUT_SCANNER_SWD_PINS  2u
+#define PINOUT_SCANNER_I2C_PINS  2u
 
 // Total permutation counts the scan iterates through.
 //   P(8, 4) = 1680     P(8, 2) = 56
 #define PINOUT_SCANNER_JTAG_TOTAL 1680u
 #define PINOUT_SCANNER_SWD_TOTAL  56u
+#define PINOUT_SCANNER_I2C_TOTAL  56u
+
+// Upper bound on addresses recorded for the winning SDA/SCL pair —
+// the full 7-bit scan range (I2C_SCAN_ADDR_MIN..I2C_SCAN_ADDR_MAX) is
+// at most 0x77 - 0x08 + 1 = 112 addresses.
+#define PINOUT_SCANNER_I2C_MAX_ADDRS 112u
 
 typedef struct {
     uint8_t tdi;
@@ -61,6 +73,13 @@ typedef struct {
     uint32_t dpidr;
     uint32_t targetsel; // compatibility echo; scan does not issue TARGETSEL
 } pinout_scan_swd_result_t;
+
+typedef struct {
+    uint8_t sda;
+    uint8_t scl;
+    uint8_t addrs[PINOUT_SCANNER_I2C_MAX_ADDRS];
+    size_t addr_count;
+} pinout_scan_i2c_result_t;
 
 // Progress / yield callback signature. Called once per iteration
 // before the candidate is tested. `cur` is the 0-based index of the
@@ -94,6 +113,28 @@ typedef enum {
 // multidrop targets; scan discovery itself uses swd_dp_bus_detect()
 // and does not issue TARGETSEL.
 pinout_scan_swd_status_t pinout_scan_swd(pinout_scan_swd_result_t* out,
+                                         pinout_scanner_progress_cb cb);
+
+// Outcome of an I2C pinout scan. Mirrors pinout_scan_swd_status_t —
+// distinguishes "swept every permutation, none ACKed" from "never
+// swept — the bus mutex was already held by another service".
+typedef enum {
+    PINOUT_SCAN_I2C_NO_MATCH = 0,
+    PINOUT_SCAN_I2C_MATCH,
+    PINOUT_SCAN_I2C_BUS_BUSY,
+} pinout_scan_i2c_status_t;
+
+// Run an I2C pinout scan over every distinct (SDA, SCL) pair on the
+// scanner header. Returns PINOUT_SCAN_I2C_MATCH on the first pair
+// whose i2c_bus_scan() finds >=1 ACKed address and repeats with the
+// exact same address set on PINOUT_SCAN_CONFIRM_READS extra scans
+// (same false-positive guard as pinout_scan_jtag/pinout_scan_swd —
+// the TXS0108EPW level shifter can inject noise that looks like a
+// stray ACK once but not consistently). Returns
+// PINOUT_SCAN_I2C_BUS_BUSY without sweeping if the service-layer bus
+// mutex (services/swd_bus_lock, owner SWD_BUS_OWNER_I2C_SCANNER) is
+// already held elsewhere.
+pinout_scan_i2c_status_t pinout_scan_i2c(pinout_scan_i2c_result_t* out,
                                          pinout_scanner_progress_cb cb);
 
 // -----------------------------------------------------------------------------

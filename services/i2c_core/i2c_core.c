@@ -91,7 +91,7 @@ bool i2c_init(uint8_t sda, uint8_t scl, uint32_t freq_khz) {
         freq_khz = 100u;
     // period_us = 1000 / freq_khz; half of that, minimum 1us so a
     // very high freq_khz doesn't collapse the delay to zero.
-    uint32_t half = 500u / freq_khz;
+    uint32_t half    = 500u / freq_khz;
     s_half_period_us = (half == 0u) ? 1u : half;
 
     s_sda = sda;
