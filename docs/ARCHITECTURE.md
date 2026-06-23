@@ -262,7 +262,7 @@ Current tree health:
   is the only way out if the operator's terminal closes uncleanly). A
   second passthrough pair (GP range still to be decided) is explicitly
   out of scope for this pass. **Verified against real hardware**: an
-  STM32F429-Disc1 driving UART2 (PA2 TX / PA3 RX) through a
+  STM32F429-Disc1 driving UART2 (PA9 TX / PA10 RX) through a
   TXS0108EPW level shifter into scanner header CH0/CH1 round-trips
   cleanly in both `faultycmd uart enable` and `faultycmd uart console`
   modes. The earlier debug-only UART1/GP4 mirror tap used while
