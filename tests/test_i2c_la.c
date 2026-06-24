@@ -1,8 +1,15 @@
 // Unit tests for services/i2c_core/i2c_la — passive I2C logic analyzer
-// sampler (see docs/I2C_LOGIC_ANALYZER_PLAN.md).
+// (DMA-paced continuous streamer; see docs/I2C_LA_DMA_TIMER_PLAN.md §3/§4).
+//
+// The fake DMA does not copy bytes, so these tests verify the channel and
+// timer are configured for a continuous ring-mode transfer and that
+// i2c_la_total() reflects the simulated DMA progress. On-wire
+// reconstruction of a real transaction is a hardware test (§5), not here.
 
 #include "unity.h"
 
+#include "hal/dma.h"
+#include "hal_fake_dma.h"
 #include "hal_fake_gpio.h"
 #include "hal_fake_time.h"
 #include "i2c_la.h"
@@ -10,13 +17,44 @@
 #define SDA 2u
 #define SCL 3u
 
+// transfer_count the driver loads for a never-ending transfer; total
+// captured == this minus the live remaining count.
+#define FOREVER 0xFFFFFFFFu
+
 void setUp(void) {
-    hal_fake_gpio_reset();
-    hal_fake_time_reset();
+    // Deinit first (a prior test may have left a capture running, and
+    // deinit aborts the DMA), THEN reset the fakes so per-test counters
+    // like abort_calls start at zero.
     i2c_la_deinit(); // safe even if not inited — resets s_inited for the next test
+    hal_fake_gpio_reset();
+    hal_fake_dma_reset();
+    hal_fake_time_reset();
 }
 
 void tearDown(void) {
+}
+
+// Index of the single channel/timer i2c_la_init claimed, or -1.
+static int claimed_dma_channel(void) {
+    for (int i = 0; i < HAL_FAKE_DMA_CHANNELS; i++) {
+        if (hal_fake_dma_channels[i].claimed)
+            return i;
+    }
+    return -1;
+}
+
+static int claimed_dma_timer(void) {
+    for (int i = 0; i < HAL_FAKE_DMA_TIMERS; i++) {
+        if (hal_fake_dma_timers[i].claimed)
+            return i;
+    }
+    return -1;
+}
+
+// Simulate the DMA having written `n` samples since start by setting the
+// decrementing transfer_count the way the hardware would.
+static void simulate_written(int ch, uint32_t n) {
+    hal_fake_dma_set_transfer_count(ch, FOREVER - n);
 }
 
 // -----------------------------------------------------------------------------
@@ -32,124 +70,150 @@ static void test_init_rejects_out_of_range_pin(void) {
     TEST_ASSERT_FALSE(i2c_la_init(30u, SCL));
     TEST_ASSERT_FALSE(i2c_la_init(SDA, 30u));
     TEST_ASSERT_FALSE(i2c_la_is_inited());
+    // A rejected init must not leak a DMA channel or timer.
+    TEST_ASSERT_EQUAL_INT(-1, claimed_dma_channel());
+    TEST_ASSERT_EQUAL_INT(-1, claimed_dma_timer());
 }
 
-static void test_init_succeeds_and_double_init_rejects(void) {
+static void test_init_claims_one_dma_channel_and_timer(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
     TEST_ASSERT_TRUE(i2c_la_is_inited());
+    TEST_ASSERT_NOT_EQUAL(-1, claimed_dma_channel());
+    TEST_ASSERT_NOT_EQUAL(-1, claimed_dma_timer());
+}
+
+static void test_init_double_init_rejects(void) {
+    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
     TEST_ASSERT_FALSE(i2c_la_init(SDA, SCL)); // already inited
+}
+
+static void test_deinit_releases_dma_and_timer(void) {
+    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
+    i2c_la_deinit();
+    TEST_ASSERT_FALSE(i2c_la_is_inited());
+    TEST_ASSERT_EQUAL_INT(-1, claimed_dma_channel());
+    TEST_ASSERT_EQUAL_INT(-1, claimed_dma_timer());
+}
+
+static void test_deinit_stops_running_capture(void) {
+    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
+    int ch = claimed_dma_channel();
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    i2c_la_deinit();
+    TEST_ASSERT_FALSE(i2c_la_is_running());
+    // The channel was aborted as part of teardown.
+    TEST_ASSERT_EQUAL_UINT32(1u, hal_fake_dma_channels[ch].abort_calls);
 }
 
 static void test_deinit_allows_reinit(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
     i2c_la_deinit();
-    TEST_ASSERT_FALSE(i2c_la_is_inited());
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
 }
 
 // -----------------------------------------------------------------------------
-// capture — argument validation
+// start — guards and lifecycle
 // -----------------------------------------------------------------------------
 
-static void test_capture_without_init_returns_zero(void) {
-    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_capture(1u, 10u, 100u));
-    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_count());
+static void test_start_without_init_returns_false(void) {
+    TEST_ASSERT_FALSE(i2c_la_start(1u));
+    TEST_ASSERT_FALSE(i2c_la_is_running());
 }
 
-static void test_capture_rejects_zero_max_samples(void) {
+static void test_start_sets_running_then_stop_clears_it(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
-    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_capture(1u, 0u, 100u));
+    TEST_ASSERT_FALSE(i2c_la_is_running());
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    TEST_ASSERT_TRUE(i2c_la_is_running());
+    i2c_la_stop();
+    TEST_ASSERT_FALSE(i2c_la_is_running());
 }
 
-static void test_capture_rejects_zero_max_ms(void) {
+static void test_start_rejects_double_start(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
-    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_capture(1u, 10u, 0u));
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    TEST_ASSERT_FALSE(i2c_la_start(1u)); // already running
 }
 
-// -----------------------------------------------------------------------------
-// capture — sample bit layout
-// -----------------------------------------------------------------------------
-
-static void test_capture_encodes_sda_scl_bits(void) {
+static void test_stop_aborts_dma(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
-
-    hal_gpio_put(SDA, true);
-    hal_gpio_put(SCL, false);
-    TEST_ASSERT_EQUAL_UINT32(1u, i2c_la_capture(1u, 1u, 1000u));
-    TEST_ASSERT_EQUAL_UINT8(I2C_LA_SAMPLE_SDA_BIT, i2c_la_buffer()[0]);
-
-    hal_gpio_put(SDA, false);
-    hal_gpio_put(SCL, true);
-    TEST_ASSERT_EQUAL_UINT32(1u, i2c_la_capture(1u, 1u, 1000u));
-    TEST_ASSERT_EQUAL_UINT8(I2C_LA_SAMPLE_SCL_BIT, i2c_la_buffer()[0]);
-
-    hal_gpio_put(SDA, true);
-    hal_gpio_put(SCL, true);
-    TEST_ASSERT_EQUAL_UINT32(1u, i2c_la_capture(1u, 1u, 1000u));
-    TEST_ASSERT_EQUAL_UINT8(I2C_LA_SAMPLE_SDA_BIT | I2C_LA_SAMPLE_SCL_BIT, i2c_la_buffer()[0]);
+    int ch = claimed_dma_channel();
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    i2c_la_stop();
+    TEST_ASSERT_EQUAL_UINT32(1u, hal_fake_dma_channels[ch].abort_calls);
 }
 
 // -----------------------------------------------------------------------------
-// capture — stop conditions
+// start — channel/timer configuration
 // -----------------------------------------------------------------------------
 
-static void test_capture_stops_at_max_samples_before_max_ms(void) {
+static void test_start_configures_ring_mode_gpio_dma(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
-    // 5 samples * 10us = 50us elapsed, far under the 1s budget.
-    TEST_ASSERT_EQUAL_UINT32(5u, i2c_la_capture(10u, 5u, 1000u));
-    TEST_ASSERT_EQUAL_UINT32(5u, i2c_la_count());
+    int ch = claimed_dma_channel();
+    int t  = claimed_dma_timer();
+
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+
+    const hal_fake_dma_state_t* s = &hal_fake_dma_channels[ch];
+    TEST_ASSERT_EQUAL_UINT(HAL_DMA_SIZE_8, s->cfg.size);
+    TEST_ASSERT_FALSE(s->cfg.read_increment);
+    TEST_ASSERT_TRUE(s->cfg.write_increment);
+    // Ring mode on the write side, wrapping the 8192-byte buffer.
+    TEST_ASSERT_EQUAL_UINT32(13u, s->cfg.ring_bits);
+    TEST_ASSERT_TRUE(s->cfg.ring_on_write);
+    TEST_ASSERT_EQUAL_UINT(hal_dma_timer_dreq(t), s->cfg.dreq);
+    TEST_ASSERT_EQUAL_PTR(hal_gpio_in_register(), s->src);
+    // Never-ending transfer.
+    TEST_ASSERT_EQUAL_UINT32(FOREVER, s->transfer_count);
 }
 
-static void test_capture_stops_at_max_ms_before_max_samples(void) {
+static void test_start_paces_timer_at_unit_numerator(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
-    // 1ms per sample; the 3ms budget is checked before each sample, so the
-    // 4th check (t=3ms) trips and the capture stops at 3 samples even
-    // though max_samples allows for 100.
-    TEST_ASSERT_EQUAL_UINT32(3u, i2c_la_capture(1000u, 100u, 3u));
-    TEST_ASSERT_EQUAL_UINT32(3u, i2c_la_count());
-}
+    int t = claimed_dma_timer();
 
-static void test_capture_caps_max_samples_to_buffer_size(void) {
-    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
-    uint32_t n = i2c_la_capture(1u, I2C_LA_CAPTURE_BUFFER_BYTES + 100u, 1000000u);
-    TEST_ASSERT_EQUAL_UINT32(I2C_LA_CAPTURE_BUFFER_BYTES, n);
-}
+    TEST_ASSERT_TRUE(i2c_la_start(10u));
 
-static void test_capture_resets_count_on_rejected_call(void) {
-    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
-    TEST_ASSERT_EQUAL_UINT32(5u, i2c_la_capture(10u, 5u, 1000u));
-    // A subsequent rejected call clears the previous count.
-    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_capture(10u, 0u, 1000u));
-    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_count());
+    // num fixed at 1; den = sys_clk(125 MHz) * 10 µs / 1e6 = 1250.
+    TEST_ASSERT_EQUAL_UINT32(1u, hal_fake_dma_timers[t].set_fraction_calls);
+    TEST_ASSERT_EQUAL_UINT16(1u, hal_fake_dma_timers[t].numerator);
+    TEST_ASSERT_EQUAL_UINT16(1250u, hal_fake_dma_timers[t].denominator);
 }
 
 // -----------------------------------------------------------------------------
-// capture — reconstructs a scripted transaction
+// total — reflects DMA progress
 // -----------------------------------------------------------------------------
 
-static void test_capture_reconstructs_scripted_transaction(void) {
+static void test_total_is_zero_before_any_samples(void) {
     TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    // Fresh transfer: transfer_count still == FOREVER, nothing written.
+    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_total());
+}
 
-    // START (SDA falls while SCL high) + one data bit '1' + ACK (slave
-    // pulls SDA low) sampled one bit pair per sample.
-    static const bool sda_script[] = {true, false, true, true, false, true};
-    static const bool scl_script[] = {true, true, true, false, true, true};
-    const size_t n                 = sizeof(sda_script) / sizeof(sda_script[0]);
+static void test_total_reflects_partial_progress(void) {
+    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
+    int ch = claimed_dma_channel();
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    simulate_written(ch, 1234u);
+    TEST_ASSERT_EQUAL_UINT32(1234u, i2c_la_total());
+}
 
-    hal_fake_gpio_input_script_load(SDA, sda_script, n);
-    hal_fake_gpio_input_script_load(SCL, scl_script, n);
+static void test_total_counts_past_buffer_size(void) {
+    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
+    int ch = claimed_dma_channel();
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    // Continuous capture: total is monotonic past the ring buffer size.
+    simulate_written(ch, I2C_LA_CAPTURE_BUFFER_BYTES + 5000u);
+    TEST_ASSERT_EQUAL_UINT32(I2C_LA_CAPTURE_BUFFER_BYTES + 5000u, i2c_la_total());
+}
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)n, i2c_la_capture(1u, (uint32_t)n, 1000u));
-
-    const uint8_t* buf = i2c_la_buffer();
-    for (size_t i = 0; i < n; i++) {
-        uint8_t expected = 0u;
-        if (sda_script[i])
-            expected |= I2C_LA_SAMPLE_SDA_BIT;
-        if (scl_script[i])
-            expected |= I2C_LA_SAMPLE_SCL_BIT;
-        TEST_ASSERT_EQUAL_UINT8(expected, buf[i]);
-    }
+static void test_total_is_zero_after_deinit(void) {
+    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
+    int ch = claimed_dma_channel();
+    TEST_ASSERT_TRUE(i2c_la_start(1u));
+    simulate_written(ch, 500u);
+    i2c_la_deinit();
+    TEST_ASSERT_EQUAL_UINT32(0u, i2c_la_total());
 }
 
 // -----------------------------------------------------------------------------
@@ -161,21 +225,24 @@ int main(void) {
 
     RUN_TEST(test_init_rejects_equal_pins);
     RUN_TEST(test_init_rejects_out_of_range_pin);
-    RUN_TEST(test_init_succeeds_and_double_init_rejects);
+    RUN_TEST(test_init_claims_one_dma_channel_and_timer);
+    RUN_TEST(test_init_double_init_rejects);
+    RUN_TEST(test_deinit_releases_dma_and_timer);
+    RUN_TEST(test_deinit_stops_running_capture);
     RUN_TEST(test_deinit_allows_reinit);
 
-    RUN_TEST(test_capture_without_init_returns_zero);
-    RUN_TEST(test_capture_rejects_zero_max_samples);
-    RUN_TEST(test_capture_rejects_zero_max_ms);
+    RUN_TEST(test_start_without_init_returns_false);
+    RUN_TEST(test_start_sets_running_then_stop_clears_it);
+    RUN_TEST(test_start_rejects_double_start);
+    RUN_TEST(test_stop_aborts_dma);
 
-    RUN_TEST(test_capture_encodes_sda_scl_bits);
+    RUN_TEST(test_start_configures_ring_mode_gpio_dma);
+    RUN_TEST(test_start_paces_timer_at_unit_numerator);
 
-    RUN_TEST(test_capture_stops_at_max_samples_before_max_ms);
-    RUN_TEST(test_capture_stops_at_max_ms_before_max_samples);
-    RUN_TEST(test_capture_caps_max_samples_to_buffer_size);
-    RUN_TEST(test_capture_resets_count_on_rejected_call);
-
-    RUN_TEST(test_capture_reconstructs_scripted_transaction);
+    RUN_TEST(test_total_is_zero_before_any_samples);
+    RUN_TEST(test_total_reflects_partial_progress);
+    RUN_TEST(test_total_counts_past_buffer_size);
+    RUN_TEST(test_total_is_zero_after_deinit);
 
     return UNITY_END();
 }

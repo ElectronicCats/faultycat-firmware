@@ -24,9 +24,14 @@ typedef struct {
 
 extern hal_fake_gpio_state_t hal_fake_gpio_states[HAL_FAKE_GPIO_MAX_PINS];
 
-// Zero every pin's state AND clears the input-script and edge-sampler
-// state. Tests should call this from setUp().
+// Zero every pin's state AND clears the input-script, edge-sampler, and
+// GPIO_IN register state. Tests should call this from setUp().
 void hal_fake_gpio_reset(void);
+
+// Backing store for hal_gpio_in_register(). DMA sources read this word;
+// tests poke it via hal_fake_gpio_set_in_register to stand in for the
+// SIO->GPIO_IN register that real hardware would sample.
+void hal_fake_gpio_set_in_register(uint32_t value);
 
 // -----------------------------------------------------------------------------
 // Input script (F8-1) — scripted return values for hal_gpio_get on a pin.

@@ -25,6 +25,10 @@ typedef struct {
 
 static input_script_t s_scripts[HAL_FAKE_GPIO_MAX_PINS];
 
+// Backing store for hal_gpio_in_register() — the DMA-source word that
+// stands in for SIO->GPIO_IN on the host.
+static uint32_t s_fake_gpio_in;
+
 // Edge sampler — single global sampler. Configurable trigger pin +
 // 4 watch pins; each rising edge of trigger appends a snapshot to a
 // flat log.
@@ -41,6 +45,7 @@ void hal_fake_gpio_reset(void) {
     memset(hal_fake_gpio_states, 0, sizeof(hal_fake_gpio_states));
     memset(s_scripts, 0, sizeof(s_scripts));
     memset(&s_edge, 0, sizeof(s_edge));
+    s_fake_gpio_in = 0u;
     s_edge.trigger = HAL_FAKE_GPIO_PIN_NONE;
     for (int i = 0; i < 4; i++)
         s_edge.watch[i] = HAL_FAKE_GPIO_PIN_NONE;
@@ -110,6 +115,14 @@ void hal_gpio_set_pulls(hal_gpio_pin_t pin, bool pull_up, bool pull_down) {
     s->pull_up               = pull_up;
     s->pull_down             = pull_down;
     s->pulls_calls++;
+}
+
+const volatile void* hal_gpio_in_register(void) {
+    return (const volatile void*)&s_fake_gpio_in;
+}
+
+void hal_fake_gpio_set_in_register(uint32_t value) {
+    s_fake_gpio_in = value;
 }
 
 // -----------------------------------------------------------------------------
