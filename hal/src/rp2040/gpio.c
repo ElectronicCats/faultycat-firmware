@@ -5,6 +5,7 @@
 #include "hal/gpio.h"
 
 #include "hardware/gpio.h"
+#include "hardware/structs/sio.h"
 
 void hal_gpio_init(hal_gpio_pin_t pin, hal_gpio_dir_t dir) {
     gpio_init(pin);
@@ -21,4 +22,8 @@ bool hal_gpio_get(hal_gpio_pin_t pin) {
 
 void hal_gpio_set_pulls(hal_gpio_pin_t pin, bool pull_up, bool pull_down) {
     gpio_set_pulls(pin, pull_up, pull_down);
+}
+
+const volatile void* hal_gpio_in_register(void) {
+    return (const volatile void*)&sio_hw->gpio_in;
 }
