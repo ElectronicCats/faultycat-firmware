@@ -63,3 +63,25 @@ uint32_t hal_dma_transfer_count(hal_dma_channel_t ch) {
         return 0;
     return dma_channel_hw_addr((uint)ch)->transfer_count;
 }
+
+hal_dma_timer_t hal_dma_timer_claim(void) {
+    return dma_claim_unused_timer(false); // -1 on fail when required=false
+}
+
+void hal_dma_timer_unclaim(hal_dma_timer_t t) {
+    if (t < 0)
+        return;
+    dma_timer_unclaim((uint)t);
+}
+
+void hal_dma_timer_set_fraction(hal_dma_timer_t t, uint16_t numerator, uint16_t denominator) {
+    if (t < 0)
+        return;
+    dma_timer_set_fraction((uint)t, numerator, denominator);
+}
+
+hal_dma_dreq_t hal_dma_timer_dreq(hal_dma_timer_t t) {
+    if (t < 0)
+        return HAL_DMA_DREQ_FORCE;
+    return (hal_dma_dreq_t)dma_get_timer_dreq((uint)t);
+}
