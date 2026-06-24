@@ -39,6 +39,7 @@
 #include "swd_dp.h"
 #include "swd_mem.h"
 #include "swd_phy.h"
+#include "sump_ols.h"
 #include "target_monitor.h"
 #include "uart_passthrough.h"
 #include "firmware_version.h"
@@ -72,6 +73,7 @@ typedef enum {
     SHELL_MODE_TEXT      = 0,
     SHELL_MODE_BUSPIRATE = 1,
     SHELL_MODE_SERPROG   = 2,
+    SHELL_MODE_SUMP      = 3,
 } shell_mode_t;
 
 static shell_mode_t s_shell_mode = SHELL_MODE_TEXT;
@@ -197,6 +199,9 @@ static void shell_help(void) {
     shell_print("SHELL:   serprog enter [<cs> <mosi> <miso> <sck>]     flashrom serprog (F8-5)\n");
     shell_print("SHELL:                                                defaults: 0 1 2 3, exit on "
                 "host disconnect\n");
+    shell_print(
+        "SHELL:   i2c la sump enter <sda> <scl>                SUMP/OLS for PulseView/sigrok\n");
+    shell_print("SHELL:                                                exit on host disconnect\n");
     shell_print("SHELL: --- UART passthrough (Target UART CDC) ---\n");
     shell_print(
         "SHELL:   uart enter [<baud> <n|e|o> <1|2>]            CH0=TX/CH1=RX, default 115200 N1\n");
@@ -820,6 +825,11 @@ static void cmd_i2c_la(int argc, char** argv) {
         usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nOVERFLOW\n");
 }
 
+// Defined below (SUMP/OLS section) — forward-declared so this
+// dispatcher can route `i2c la sump enter ...` to it ahead of its
+// definition.
+static void process_i2c_la_sump_subcmd(int argc, char** argv);
+
 static void process_i2c_subcmd(int argc, char** argv) {
     if (argc < 2) {
         shell_print("I2C: ERR i2c needs subcommand: probe, la\n");
@@ -828,9 +838,15 @@ static void process_i2c_subcmd(int argc, char** argv) {
     const char* sub = argv[1];
     if (!strcmp(sub, "probe"))
         cmd_i2c_probe(argc, argv);
-    else if (!strcmp(sub, "la"))
-        cmd_i2c_la(argc, argv);
-    else
+    else if (!strcmp(sub, "la")) {
+        // `i2c la sump enter <sda> <scl>` vs. the plain
+        // `i2c la <sda> <scl> <us> <n>` hexdump capture — argv[2]
+        // disambiguates (a pin number vs. the literal "sump").
+        if (argc >= 3 && !strcmp(argv[2], "sump"))
+            process_i2c_la_sump_subcmd(argc, argv);
+        else
+            cmd_i2c_la(argc, argv);
+    } else
         shell_printf("I2C: ERR unknown_subcmd: %s (try `?`)\n", sub);
 }
 
@@ -1017,6 +1033,78 @@ static void process_serprog_subcmd(int argc, char** argv) {
     shell_print("SERPROG: ready for `flashrom -p serprog:dev=/dev/ttyACM<N>`\n");
     shell_print("SERPROG: exit by closing the host port (DTR drop is detected)\n");
     s_shell_mode = SHELL_MODE_SERPROG;
+}
+
+// -----------------------------------------------------------------------------
+// SUMP/OLS — i2c_la over the classic SUMP serial protocol, so
+// PulseView/sigrok's stock "ols" driver can drive it directly (see
+// docs/I2C_LA_DMA_TIMER_PLAN.md §6). Like serprog, SUMP has no in-band
+// exit byte, so leaving the mode depends on the DTR-drop disconnect
+// hook below. UX note (deliberate tradeoff, see plan doc): the
+// operator must send `i2c la sump enter` and then point
+// PulseView/sigrok-cli at the same port before anything drops DTR —
+// if it drops first, the firmware reverts to the text shell and the
+// enter command has to be resent.
+// -----------------------------------------------------------------------------
+
+static void sump_write_byte_cb(uint8_t b, void* u) {
+    (void)u;
+    usb_composite_cdc_write(USB_CDC_SCANNER, &b, 1);
+}
+
+static void sump_yield_cb(void* u) {
+    (void)u;
+    // Same cooperative-tasking shape as sp_yield_cb — keeps the rest
+    // of the firmware alive during ARM's (potentially long) capture
+    // stream.
+    usb_composite_task();
+    pump_emfi_cdc();
+    pump_crowbar_cdc();
+    emfi_campaign_tick();
+    crowbar_campaign_tick();
+}
+
+static void sump_on_exit_cb(void* u) {
+    (void)u;
+    i2c_la_stop();
+    i2c_la_deinit();
+    swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+    s_shell_mode = SHELL_MODE_TEXT;
+    shell_print("\nSUMP: OK exited (back to text shell)\n");
+}
+
+static const sump_ols_callbacks_t SUMP_CALLBACKS = {
+    .write_byte = sump_write_byte_cb,
+    .yield      = sump_yield_cb,
+    .on_exit    = sump_on_exit_cb,
+    .user       = NULL,
+};
+
+static void process_i2c_la_sump_subcmd(int argc, char** argv) {
+    // argv: i2c la sump enter <sda> <scl>
+    if (argc < 6 || strcmp(argv[3], "enter") != 0) {
+        shell_print("I2C: ERR usage: i2c la sump enter <sda> <scl>\n");
+        return;
+    }
+    if (shell_bus_busy("I2C"))
+        return;
+    uint8_t sda = (uint8_t)strtoul(argv[4], NULL, 0);
+    uint8_t scl = (uint8_t)strtoul(argv[5], NULL, 0);
+    if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
+        shell_print("I2C: ERR bus_busy (held by another service)\n");
+        return;
+    }
+    if (!i2c_la_init(sda, scl)) {
+        shell_print("I2C: ERR init_failed (pin range or duplicate?)\n");
+        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+        return;
+    }
+    sump_ols_init(&SUMP_CALLBACKS);
+    shell_printf("I2C: OK entering SUMP mode sda=GP%u scl=GP%u\n", sda, scl);
+    shell_print("I2C: point PulseView/sigrok-cli (driver 'ols') at this port NOW —\n");
+    shell_print("I2C: DTR dropping before that re-arms text mode and loses this session\n");
+    // Set mode AFTER the prints, same ordering reason as buspirate/serprog.
+    s_shell_mode = SHELL_MODE_SUMP;
 }
 
 // -----------------------------------------------------------------------------
@@ -1579,6 +1667,10 @@ static void pump_shell_cdc(void) {
             flashrom_serprog_feed_byte(b);
             continue;
         }
+        if (s_shell_mode == SHELL_MODE_SUMP) {
+            sump_ols_feed_byte(b);
+            continue;
+        }
 
         if (b == '\r' || b == '\n') {
             if (shell_pos > 0u) {
@@ -1810,6 +1902,8 @@ int main(void) {
                 bp_on_exit_cb(NULL);
             } else if (s_shell_mode == SHELL_MODE_SERPROG) {
                 sp_on_exit_cb(NULL);
+            } else if (s_shell_mode == SHELL_MODE_SUMP) {
+                sump_on_exit_cb(NULL);
             }
         }
         last_scanner_conn = conn;
