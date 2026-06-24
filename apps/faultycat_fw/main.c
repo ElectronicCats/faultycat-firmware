@@ -739,7 +739,17 @@ static void cmd_i2c_la(int argc, char** argv) {
         pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", buf[i]);
         if (pos >= sizeof(line) - 4 || i + 1 == count) {
             line[pos++] = '\n';
-            usb_composite_cdc_write(USB_CDC_SCANNER, line, pos);
+            // tud_cdc_n_write() (behind usb_composite_cdc_write) silently
+            // truncates when the TX ring buffer is full instead of
+            // blocking — at full speed this loop fills it well before the
+            // host drains it over USB, so partial writes must be retried
+            // or the host sees a short, garbled hex stream.
+            size_t off = 0;
+            while (off < pos) {
+                off += usb_composite_cdc_write(USB_CDC_SCANNER, line + off, pos - off);
+                if (off < pos)
+                    hal_sleep_ms(1);
+            }
             pos = 0;
         }
     }
