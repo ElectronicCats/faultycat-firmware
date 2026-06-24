@@ -706,6 +706,12 @@ static void cmd_i2c_probe(int argc, char** argv) {
 // #2/#3), so this directly bounds how long the USB shell is unresponsive.
 #define I2C_LA_SHELL_MAX_MS 200u
 
+// Upper bound on retrying a stalled USB write (host not draining, USB
+// glitch). Without this, a TX ring buffer that never frees up would
+// spin cmd_i2c_la's retry loop forever and wedge the whole shell, not
+// just this command — worse than the short/garbled hexdump it replaces.
+#define I2C_LA_WRITE_RETRY_MAX_MS 500u
+
 static void cmd_i2c_la(int argc, char** argv) {
     if (argc < 6) {
         shell_print("I2C: ERR usage: i2c la <sda> <scl> <us> <n>\n");
@@ -744,11 +750,15 @@ static void cmd_i2c_la(int argc, char** argv) {
             // blocking — at full speed this loop fills it well before the
             // host drains it over USB, so partial writes must be retried
             // or the host sees a short, garbled hex stream.
-            size_t off = 0;
+            size_t off           = 0;
+            uint32_t write_start = hal_now_ms();
             while (off < pos) {
                 off += usb_composite_cdc_write(USB_CDC_SCANNER, line + off, pos - off);
-                if (off < pos)
+                if (off < pos) {
+                    if ((uint32_t)(hal_now_ms() - write_start) >= I2C_LA_WRITE_RETRY_MAX_MS)
+                        return; // give up — host will see a short hexdump and time out
                     hal_sleep_ms(1);
+                }
             }
             pos = 0;
         }
