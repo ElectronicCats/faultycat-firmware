@@ -70,13 +70,12 @@ typedef int hal_dma_timer_t; // -1 == invalid
 
 // Claim one of the 4 DMA timers. Returns -1 if all 4 are busy.
 hal_dma_timer_t hal_dma_timer_claim(void);
-void            hal_dma_timer_unclaim(hal_dma_timer_t t);
+void hal_dma_timer_unclaim(hal_dma_timer_t t);
 
 // Pace the timer's DREQ at sys_clk * (numerator/denominator) Hz.
 // Caller computes numerator/denominator for the desired sample rate
 // (sys_clk is normally 125 MHz on RP2040). numerator must be <= denominator.
-void hal_dma_timer_set_fraction(hal_dma_timer_t t, uint16_t numerator,
-                                uint16_t denominator);
+void hal_dma_timer_set_fraction(hal_dma_timer_t t, uint16_t numerator, uint16_t denominator);
 
 // Returns the HAL_DMA_DREQ_TIMERn value for a claimed timer, to plug
 // straight into hal_dma_cfg_t.dreq.

@@ -696,21 +696,44 @@ static void cmd_i2c_probe(int argc, char** argv) {
 
 // -----------------------------------------------------------------------------
 // I2C passive logic analyzer — `i2c la <sda> <scl> <us> <n>` (Option A from
-// docs/I2C_LOGIC_ANALYZER_PLAN.md §"Salida sobre CDC2"): captures via
-// i2c_la_capture and hex-dumps the buffer as plain text over the existing
-// shell — no new protocol, no SHELL_MODE_* switch.
+// docs/I2C_LOGIC_ANALYZER_PLAN.md §"Salida sobre CDC2"): streams samples as
+// plain hex text over the existing shell — no new protocol, no SHELL_MODE_*
+// switch. The driver captures continuously into a ring buffer
+// (docs/I2C_LA_DMA_TIMER_PLAN.md); this command drains that ring to USB as
+// it fills, so `n` (total samples) is no longer capped at the buffer size.
 // -----------------------------------------------------------------------------
-
-// Upper bound on the capture's blocking stall. i2c_la_capture is a
-// busy-wait loop (no async timer, no yielding — see plan §"Restricciones"
-// #2/#3), so this directly bounds how long the USB shell is unresponsive.
-#define I2C_LA_SHELL_MAX_MS 200u
 
 // Upper bound on retrying a stalled USB write (host not draining, USB
 // glitch). Without this, a TX ring buffer that never frees up would
 // spin cmd_i2c_la's retry loop forever and wedge the whole shell, not
 // just this command — worse than the short/garbled hexdump it replaces.
-#define I2C_LA_WRITE_RETRY_MAX_MS 500u
+// 5s gives a slow/loaded host (e.g. pyserial polling in small chunks)
+// enough room to drain a full buffer's worth of samples without the
+// firmware giving up mid-transfer.
+#define I2C_LA_WRITE_RETRY_MAX_MS 5000u
+
+// Write `len` bytes to the scanner CDC, retrying partial writes while
+// pumping USB. tud_cdc_n_write() (behind usb_composite_cdc_write) silently
+// truncates when the TX ring buffer is full instead of blocking — at full
+// speed the stream fills it well before the host drains it over USB, so
+// partial writes must be retried or the host sees a short, garbled hex
+// stream. hal_busy_wait_us() does NOT service tud_task, so usb_composite_
+// task() is pumped here or the TX FIFO completion never frees the ring.
+// Returns false (and gives up) once I2C_LA_WRITE_RETRY_MAX_MS elapses.
+static bool i2c_la_cdc_write_all(const char* data, size_t len) {
+    size_t off           = 0;
+    uint32_t write_start = hal_now_ms();
+    while (off < len) {
+        off += usb_composite_cdc_write(USB_CDC_SCANNER, data + off, len - off);
+        if (off < len) {
+            if ((uint32_t)(hal_now_ms() - write_start) >= I2C_LA_WRITE_RETRY_MAX_MS)
+                return false;
+            usb_composite_task();
+            hal_busy_wait_us(1000);
+        }
+    }
+    return true;
+}
 
 static void cmd_i2c_la(int argc, char** argv) {
     if (argc < 6) {
@@ -723,6 +746,10 @@ static void cmd_i2c_la(int argc, char** argv) {
     uint8_t scl = (uint8_t)strtoul(argv[3], NULL, 0);
     uint32_t us = (uint32_t)strtoul(argv[4], NULL, 0);
     uint32_t n  = (uint32_t)strtoul(argv[5], NULL, 0);
+    if (n == 0u) {
+        shell_print("I2C: ERR n must be > 0\n");
+        return;
+    }
     if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
         shell_print("I2C: ERR bus_busy (held by another service)\n");
         return;
@@ -732,37 +759,65 @@ static void cmd_i2c_la(int argc, char** argv) {
         swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
         return;
     }
-    uint32_t count     = i2c_la_capture(us, n, I2C_LA_SHELL_MAX_MS);
+    if (!i2c_la_start(us)) {
+        shell_print("I2C: ERR start_failed\n");
+        i2c_la_deinit();
+        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+        return;
+    }
+
+    shell_printf("I2C: LA OK sda=GP%u scl=GP%u stream n=%lu interval_us=%lu\n", sda, scl,
+                 (unsigned long)n, (unsigned long)us);
+
     const uint8_t* buf = i2c_la_buffer();
+    uint32_t cursor    = 0u; // samples already streamed
+    bool overflow      = false;
+    bool gave_up       = false;
+    char line[80];
+    size_t pos = 0;
+
+    // Drain the ring continuously until n samples have streamed. The DMA
+    // timer paces samples regardless of bus activity, so i2c_la_total()
+    // always advances and this loop always terminates at n.
+    while (cursor < n && !gave_up) {
+        uint32_t written = i2c_la_total();
+        if (written > n)
+            written = n; // don't stream past the requested count
+        // If the DMA lapped the cursor, those samples are gone — skip to
+        // the oldest still in the ring and flag it once.
+        if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+            overflow = true;
+            cursor   = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+        }
+        while (cursor < written) {
+            uint8_t b = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
+            pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", b);
+            cursor++;
+            if (pos >= sizeof(line) - 4) {
+                line[pos++] = '\n';
+                if (!i2c_la_cdc_write_all(line, pos)) {
+                    gave_up = true;
+                    break;
+                }
+                pos = 0;
+            }
+        }
+        // Keep USB serviced while waiting for the timer to pace more.
+        usb_composite_task();
+    }
+    if (pos > 0u && !gave_up) {
+        line[pos++] = '\n';
+        i2c_la_cdc_write_all(line, pos);
+    }
+
+    i2c_la_stop();
     i2c_la_deinit();
     swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
 
-    shell_printf("I2C: LA OK sda=GP%u scl=GP%u samples=%lu interval_us=%lu\n", sda, scl,
-                 (unsigned long)count, (unsigned long)us);
-    char line[80];
-    size_t pos = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", buf[i]);
-        if (pos >= sizeof(line) - 4 || i + 1 == count) {
-            line[pos++] = '\n';
-            // tud_cdc_n_write() (behind usb_composite_cdc_write) silently
-            // truncates when the TX ring buffer is full instead of
-            // blocking — at full speed this loop fills it well before the
-            // host drains it over USB, so partial writes must be retried
-            // or the host sees a short, garbled hex stream.
-            size_t off           = 0;
-            uint32_t write_start = hal_now_ms();
-            while (off < pos) {
-                off += usb_composite_cdc_write(USB_CDC_SCANNER, line + off, pos - off);
-                if (off < pos) {
-                    if ((uint32_t)(hal_now_ms() - write_start) >= I2C_LA_WRITE_RETRY_MAX_MS)
-                        return; // give up — host will see a short hexdump and time out
-                    hal_sleep_ms(1);
-                }
-            }
-            pos = 0;
-        }
-    }
+    if (gave_up)
+        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nTRUNC\n");
+    else if (overflow)
+        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nOVERFLOW\n");
 }
 
 static void process_i2c_subcmd(int argc, char** argv) {
