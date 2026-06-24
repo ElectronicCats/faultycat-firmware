@@ -264,6 +264,26 @@ endfunction()
 
 faultycat_add_service_i2c_la_test(test_i2c_la)
 
+# SUMP/OLS — PulseView/sigrok protocol subset over i2c_la (see
+# docs/I2C_LA_DMA_TIMER_PLAN.md §6). Links i2c_la.c too since
+# sump_ols.c calls into it directly (init/start/stop/total/buffer).
+function(faultycat_add_service_sump_ols_test name)
+    add_executable(${name}
+        ${name}.c
+        ${CMAKE_SOURCE_DIR}/services/sump_ols/sump_ols.c
+        ${CMAKE_SOURCE_DIR}/services/i2c_core/i2c_la.c
+    )
+    target_link_libraries(${name} PRIVATE unity hal_fake)
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/drivers/include
+        ${CMAKE_SOURCE_DIR}/services/sump_ols
+        ${CMAKE_SOURCE_DIR}/services/i2c_core
+    )
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+faultycat_add_service_sump_ols_test(test_sump_ols)
+
 # F9-2 — campaign_manager (sweep state machine + ringbuffer)
 function(faultycat_add_service_campaign_test name)
     add_executable(${name}
