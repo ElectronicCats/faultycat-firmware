@@ -13,8 +13,10 @@
 #include <string.h>
 
 #include "hal/dma.h"
+#include "hal/pio.h"
 #include "hal_fake_dma.h"
 #include "hal_fake_gpio.h"
+#include "hal_fake_pio.h"
 #include "hal_fake_time.h"
 #include "i2c_la.h"
 #include "sump_ols.h"
@@ -22,6 +24,10 @@
 #define SDA     2u
 #define SCL     3u
 #define FOREVER 0xFFFFFFFFu
+
+// pio1/SM2 — see services/i2c_core/i2c_la.c.
+#define I2C_LA_PIO_INSTANCE 1u
+#define I2C_LA_PIO_SM       2u
 
 // -----------------------------------------------------------------------------
 // Test fixtures
@@ -36,14 +42,6 @@ static int s_yield_calls;
 static int claimed_dma_channel(void) {
     for (int i = 0; i < HAL_FAKE_DMA_CHANNELS; i++) {
         if (hal_fake_dma_channels[i].claimed)
-            return i;
-    }
-    return -1;
-}
-
-static int claimed_dma_timer(void) {
-    for (int i = 0; i < HAL_FAKE_DMA_TIMERS; i++) {
-        if (hal_fake_dma_timers[i].claimed)
             return i;
     }
     return -1;
@@ -80,6 +78,7 @@ void setUp(void) {
     i2c_la_deinit();
     hal_fake_gpio_reset();
     hal_fake_dma_reset();
+    hal_fake_pio_reset();
     hal_fake_time_reset();
     s_writes_len  = 0;
     s_yield_calls = 0;
@@ -153,8 +152,9 @@ static void test_metadata_reports_8_probes_and_buffer_size(void) {
 
 // -----------------------------------------------------------------------------
 // CMD_SET_DIVIDER (0x80) — divider = CLOCK_RATE(100MHz)/samplerate - 1,
-// so interval_us = (divider+1)/100. Verified by checking the timer
-// fraction i2c_la_start() actually programs on the next ARM.
+// so interval_us = (divider+1)/100. Verified by checking the PIO SM
+// clkdiv i2c_la_start() actually programs on the next ARM (2 SM cycles
+// per sample — see services/i2c_core/i2c_la.c).
 // -----------------------------------------------------------------------------
 
 static void test_set_divider_feeds_interval_into_next_arm(void) {
@@ -166,21 +166,18 @@ static void test_set_divider_feeds_interval_into_next_arm(void) {
     uint8_t arm = 0x01u;
     feed(&arm, 1u);
 
-    int t = claimed_dma_timer();
-    TEST_ASSERT_NOT_EQUAL(-1, t);
-    // den = sys_clk(125MHz) * interval_us(100) / 1e6 = 12500.
-    TEST_ASSERT_EQUAL_UINT16(1u, hal_fake_dma_timers[t].numerator);
-    TEST_ASSERT_EQUAL_UINT16(12500u, hal_fake_dma_timers[t].denominator);
+    // clk_div = sys_clk(125MHz) * interval_us(100) / 1e6 / 2 = 6250.
+    const hal_fake_pio_sm_state_t* sm = &hal_fake_pio_insts[I2C_LA_PIO_INSTANCE].sm[I2C_LA_PIO_SM];
+    TEST_ASSERT_EQUAL_FLOAT(6250.0f, sm->last_cfg.clk_div);
 }
 
 static void test_arm_without_set_divider_uses_default_interval(void) {
     uint8_t arm = 0x01u;
     feed(&arm, 1u);
 
-    int t = claimed_dma_timer();
-    TEST_ASSERT_NOT_EQUAL(-1, t);
-    // den = 125MHz * 2us / 1e6 = 250.
-    TEST_ASSERT_EQUAL_UINT16(250u, hal_fake_dma_timers[t].denominator);
+    // den = 125MHz * 2us / 1e6 / 2 = 125.
+    const hal_fake_pio_sm_state_t* sm = &hal_fake_pio_insts[I2C_LA_PIO_INSTANCE].sm[I2C_LA_PIO_SM];
+    TEST_ASSERT_EQUAL_FLOAT(125.0f, sm->last_cfg.clk_div);
 }
 
 // -----------------------------------------------------------------------------
