@@ -64,7 +64,7 @@ layer). 404 firmware Unity tests remain green.
 | F12 — GUI Web local (v3.1.0) | — | post `v3.0.0`. New phase added 2026-04-29, scoped entirely to the host tool (now a separate repository) — no firmware-side changes. |
 
 Current tree health:
-- **9 drivers** implemented (8 active + `voltage_mux` stub) under `drivers/`.
+- **8 drivers** implemented under `drivers/`.
 - **USB composite** up on VID:PID `1209:fa17`. 10 interfaces
   (4×CDC + Vendor + HID). 16/16 endpoints used (hard RP2040 limit).
   `bcdUSB=0x0210` + BOS + MS OS 2.0 descriptors for Windows WinUSB
@@ -368,7 +368,6 @@ compatible — existing EMFI / crowbar configures are unaffected.
 │    scanner_io     (GP0..GP7, 8 channels)                        ✓ F2a        │
 │    ext_trigger    (GP8 + pull config)                           ✓ F2a        │
 │    crowbar_mosfet (GP17 LP / GP16 HP + break-before-make)       ✓ F2b        │
-│    voltage_mux    (stub — no HW mux on v2.x)                    ✓ F2b        │
 │    hv_charger     (GP20 PWM flyback + GP18 CHARGED, 60s auto)   ✓ F2b SIGNED │
 │    emfi_pulse     (GP14 HV pulse, CPU-timed manual)             ✓ F2b SIGNED │
 ├────────────────────────────────────────────────────────────────────────────┤
