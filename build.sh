@@ -21,4 +21,6 @@ if [[ -z "${UF2}" ]]; then
     exit 1
 fi
 
-echo "Firmware built: ${UF2}"
+mv "${UF2}" .
+
+echo "Firmware built: $(basename "${UF2}")"
