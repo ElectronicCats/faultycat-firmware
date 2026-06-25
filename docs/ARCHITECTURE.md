@@ -314,10 +314,15 @@ SWCLK/SWDIO pins). F8-1 deliberately keeps `services/jtag_core` on
 **CPU bit-bang via `hal/gpio`**, NOT PIO — the TXS0108EPW level
 shifter on the scanner header caps wire rate at ~25 MHz anyway and
 matching blueTag's proven pure-CPU path keeps F8-1 testable host-
-side without a PIO simulator. `pio1` SM 1..3 stay reserved for
-`target-uart` (F8) and the eventual buspirate-compat SPI bit-banger
-(F8-4 if we want hardware-rate flashrom), splitting across those
-consumers.
+side without a PIO simulator. `pio1` SM 2 is claimed by
+`services/i2c_core/i2c_la` (2-instruction GPIO snapshot loop, see
+`docs/I2C_LA_DMA_TIMER_PLAN.md` postmortem — DMA cannot read
+`SIO->GPIO_IN` on RP2040, so the logic-analyzer sampler moved to PIO
+instead of the originally planned DMA-timer/SIO design). `pio1` SM
+1 and SM 3 stay reserved for `target-uart` (F8) and the eventual
+buspirate-compat SPI bit-banger (F8-4 if we want hardware-rate
+flashrom); i2c_la's 2-instruction program leaves the bulk of pio1's
+32-slot instruction memory free for them.
 
 **HAL extension (F6-2):** `hal/include/hal/pio.h` gained
 `out_pin_base/count`, `wrap_target/end` (relative to program start),
