@@ -16,10 +16,13 @@
 // scanner header.
 //
 // Sampling path (see docs/I2C_LA_DMA_TIMER_PLAN.md):
-//   - No PIO: pio0/pio1 are fully allocated, and SDA/SCL are an arbitrary
-//     (not necessarily adjacent) pair over GP0..GP7. Instead a DMA timer
-//     paces a DMA channel that copies SIO->GPIO_IN[7:0] into the buffer
-//     with no CPU per sample — same ring pattern as emfi_capture.c.
+//   - PIO (pio1/SM2) runs a 2-instruction loop (`in pins, 8` / `push`)
+//     that snapshots GP0..GP7 into its RX FIFO every clk_div cycles; a
+//     DMA channel drains that FIFO into the buffer with no CPU per
+//     sample — same ring pattern as emfi_capture.c. An earlier design
+//     paced a DMA channel reading straight from SIO->GPIO_IN via a DMA
+//     timer; that doesn't work on RP2040 (SIO isn't reachable by the DMA
+//     bus master), hence PIO instead.
 //   - Continuous streaming, not a fixed one-shot: i2c_la_start arms a
 //     ring-mode DMA that runs in the background and wraps the buffer
 //     forever. The caller drains it as it fills (read cursor vs.

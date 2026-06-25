@@ -781,8 +781,8 @@ static void cmd_i2c_la(int argc, char** argv) {
     char line[80];
     size_t pos = 0;
 
-    // Drain the ring continuously until n samples have streamed. The DMA
-    // timer paces samples regardless of bus activity, so i2c_la_total()
+    // Drain the ring continuously until n samples have streamed. The PIO
+    // SM paces samples regardless of bus activity, so i2c_la_total()
     // always advances and this loop always terminates at n.
     while (cursor < n && !gave_up) {
         uint32_t written = i2c_la_total();
