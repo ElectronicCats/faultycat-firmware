@@ -2,13 +2,18 @@
 
 #include <string.h>
 
+static uint16_t crc16_update(uint16_t crc, uint8_t byte) {
+    crc ^= (uint16_t)byte << 8;
+    for (int b = 0; b < 8; b++) {
+        crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u) : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
+
 uint16_t frame_proto_crc16(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFFu;
     for (size_t i = 0; i < len; i++) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (int b = 0; b < 8; b++) {
-            crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u) : (uint16_t)(crc << 1);
-        }
+        crc = crc16_update(crc, data[i]);
     }
     return crc;
 }
@@ -68,12 +73,7 @@ bool frame_proto_feed(frame_parser_t* p, uint8_t byte, uint32_t now_ms, uint8_t 
             uint8_t hdr[3] = {p->cmd, (uint8_t)(p->len & 0xFFu), (uint8_t)((p->len >> 8) & 0xFFu)};
             uint16_t calc  = frame_proto_crc16(hdr, 3);
             for (uint16_t i = 0; i < p->len; i++) {
-                uint16_t crc = calc;
-                crc ^= (uint16_t)p->payload[i] << 8;
-                for (int b = 0; b < 8; b++) {
-                    crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u) : (uint16_t)(crc << 1);
-                }
-                calc = crc;
+                calc = crc16_update(calc, p->payload[i]);
             }
             bool ok = (calc == p->crc_recv);
             if (ok) {
