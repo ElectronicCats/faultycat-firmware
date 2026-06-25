@@ -49,6 +49,7 @@ function(faultycat_add_service_emfi_test name)
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/emfi/emfi_campaign.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/emfi_proto/emfi_proto.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto/campaign_proto.c
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto/frame_proto.c
         ${CMAKE_SOURCE_DIR}/services/campaign_manager/campaign_manager.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake firmware_version)
@@ -60,6 +61,7 @@ function(faultycat_add_service_emfi_test name)
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/emfi
         ${CMAKE_SOURCE_DIR}/services/host_proto/emfi_proto
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto
         ${CMAKE_SOURCE_DIR}/services/campaign_manager
     )
     add_test(NAME ${name} COMMAND ${name})
@@ -107,6 +109,7 @@ function(faultycat_add_service_crowbar_test name)
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/crowbar/crowbar_campaign.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/crowbar_proto/crowbar_proto.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto/campaign_proto.c
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto/frame_proto.c
         ${CMAKE_SOURCE_DIR}/services/campaign_manager/campaign_manager.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake firmware_version)
@@ -117,6 +120,7 @@ function(faultycat_add_service_crowbar_test name)
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/crowbar
         ${CMAKE_SOURCE_DIR}/services/host_proto/crowbar_proto
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto
         ${CMAKE_SOURCE_DIR}/services/campaign_manager
     )
     add_test(NAME ${name} COMMAND ${name})
