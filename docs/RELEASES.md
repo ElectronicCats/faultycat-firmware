@@ -3,7 +3,7 @@
 This document describes how the FaultyCat firmware (RP2040 UF2) is
 versioned, built, and shipped. It covers:
 
-  - the version scheme used by the project (`vX.Y.Z.W`),
+  - the version scheme used by the project (`vA.X.Y.Z`),
   - where the version lives in the source tree and how it propagates
     into the running firmware,
   - the wire-protocol fields a host tool can use to check parity with
@@ -20,30 +20,30 @@ firmware exposes for any host tool to consume.
 
 ## Version scheme
 
-Releases are tagged `vMAJOR.MINOR.PATCH.TWEAK`. Four numeric
-segments, mandatory `v` prefix on the git tag. Pre-release variants
-append a hyphen-suffix (`v3.0.0.0-rc1`).
+Releases are tagged `vA.X.Y.Z`. Four numeric segments, mandatory `v`
+prefix on the git tag. Pre-release variants append a hyphen-suffix
+(`v3.0.0.0-rc1`).
 
 | Segment | Bumped when… |
 |---|---|
-| MAJOR | Incompatible wire-protocol change (PING reply shape, opcode renumbering, CDC interface re-layout). Operators must re-flash and update any host tool together. |
-| MINOR | New protocol command that the firmware gained; remains backwards-compatible at the *transport* level (an old host tool can still PING new firmware) but an Exact-match version gate on the host side would refuse the pairing anyway. |
-| PATCH | Bug fix or polish that does not add or remove protocol surface. |
-| TWEAK | Reserved for hotfixes-of-patch and for distinguishing identical-looking re-spins (e.g. a CI re-run that produced a different binary). |
+| A (board) | The firmware targets a different compatible hardware board/revision. Operators must confirm the UF2 matches the board in hand before flashing. |
+| X (major) | Incompatible wire-protocol change (PING reply shape, opcode renumbering, CDC interface re-layout). Operators must re-flash and update any host tool together. |
+| Y (minor) | New protocol command that the firmware gained; remains backwards-compatible at the *transport* level (an old host tool can still PING new firmware) but an Exact-match version gate on the host side would refuse the pairing anyway. |
+| Z (patch) | Bug fix or polish that does not add or remove protocol surface. |
 
 An Exact-match policy (host tool must agree with firmware on **all
 four** segments) is the recommended pairing check for any host tool
 talking to this firmware — see "Host-side parity gate" below for the
 fields the firmware exposes to support that check. The four-segment
 shape gives a release the flexibility to ship a firmware-only patch
-without bumping the user-visible MAJOR/MINOR.
+without bumping the user-visible X/Y.
 
 The `v` prefix is preserved in everything user-facing (git tag, UF2
 filename, GitHub release title, artifact name in CI).
 
 ## Where the version lives in the source tree
 
-`CMakeLists.txt`'s `project(faultycat VERSION X.Y.Z.W ...)` is the
+`CMakeLists.txt`'s `project(faultycat VERSION A.X.Y.Z ...)` is the
 single source of truth on the firmware side. The release workflow
 (`.github/workflows/release.yml`) and the local helper
 (`scripts/get_build.sh`) rewrite this literal on every tag. The
@@ -52,12 +52,12 @@ top-level CMakeLists.txt then runs
 `firmware_version.h`:
 
 ```c
-#define FW_VERSION_MAJOR  3u
+#define FW_VERSION_BOARD  3u
+#define FW_VERSION_MAJOR  0u
 #define FW_VERSION_MINOR  0u
 #define FW_VERSION_PATCH  0u
-#define FW_VERSION_TWEAK  0u
 #define FW_VERSION_STR    "3.0.0.0"
-#define FW_VERSION_BCD    /* packed 0xMMmp for USB bcdDevice */
+#define FW_VERSION_BCD    /* packed 0xBBmp for USB bcdDevice */
 ```
 
 The generated header is exposed as a CMake `INTERFACE` library
@@ -78,7 +78,7 @@ embeds the four version bytes directly in the reply payload:
 
 ```
 SOF  CMD|0x80  LEN_LE     payload (6 bytes)              CRC_LE
-0xFA 0x81      0x06 0x00  'F' family MAJ MIN PATCH TWEAK CC CC
+0xFA 0x81      0x06 0x00  'F' family BOARD MAJ MIN PATCH CC CC
 ```
 
 `family` is `'4'` for emfi_proto and `'5'` for crowbar_proto so a
@@ -118,9 +118,9 @@ Useful for an at-a-glance check without typing anything.
 ### USB bcdDevice
 
 The USB device descriptor's `bcdDevice` field is computed from
-`FW_VERSION_BCD` and packed as `0xMMmp` (MAJOR encoded as BCD in the
-high byte, MINOR in the high nibble of the low byte, PATCH in the
-low nibble). The TWEAK component does not fit in the 16-bit field
+`FW_VERSION_BCD` and packed as `0xBBmp` (BOARD encoded as BCD in the
+high byte, MAJOR in the high nibble of the low byte, MINOR in the
+low nibble). The PATCH component does not fit in the 16-bit field
 and is intentionally dropped from `bcdDevice`; it remains reachable
 via PING / `version` / the banner. Operators reading `lsusb -v` see
 the first three segments without re-opening any of the CDC ports.

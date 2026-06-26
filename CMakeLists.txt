@@ -44,8 +44,8 @@ if(FAULTYCAT_BUILD_FIRMWARE)
 endif()
 
 project(faultycat
-    # 4-segment version (MAJOR.MINOR.PATCH.TWEAK). Bumped in-place by
-    # the release workflow's `sed` step on every `vX.Y.Z.W` tag push.
+    # 4-segment version (BOARD.MAJOR.MINOR.PATCH). Bumped in-place by
+    # the release workflow's `sed` step on every `vA.X.Y.Z` tag push.
     # The workflow rejects tags that don't match the 4-segment shape.
     VERSION      2.2.1.0
     LANGUAGES    C CXX ASM

@@ -82,10 +82,10 @@ size_t crowbar_proto_dispatch(uint8_t* reply, size_t reply_cap) {
             static const uint8_t pong[] = {
                 'F',
                 '5',
+                (uint8_t)FW_VERSION_BOARD,
                 (uint8_t)FW_VERSION_MAJOR,
                 (uint8_t)FW_VERSION_MINOR,
                 (uint8_t)FW_VERSION_PATCH,
-                (uint8_t)FW_VERSION_TWEAK,
             };
             memcpy(rpl, pong, sizeof(pong));
             rpl_len = (uint16_t)sizeof(pong);

@@ -3,7 +3,7 @@ name: Create Release on Tag
 # Mirrors the Minino release flow, adapted to the pico-sdk (RP2040)
 # toolchain.
 #
-# Trigger: maintainer pushes a 4-segment tag `vMAJOR.MINOR.PATCH.TWEAK`
+# Trigger: maintainer pushes a 4-segment tag `vBOARD.MAJOR.MINOR.PATCH`
 # (with an optional `-suffix` for pre-releases). The workflow:
 #   1. Strips the `v` prefix and validates the version shape.
 #   2. Defensively rewrites the version literal in CMakeLists.txt
@@ -71,7 +71,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]]; then
-            echo "::error::Tag '${TAG}' does not match vMAJOR.MINOR.PATCH.TWEAK[-suffix]"
+            echo "::error::Tag '${TAG}' does not match vBOARD.MAJOR.MINOR.PATCH[-suffix]"
             exit 1
           fi
           VERSION="${TAG#v}"
@@ -133,7 +133,7 @@ jobs:
 
       - name: Build the "Highlights" commit list
         # Collects the most relevant commits since the previous
-        # release tag (matching `vMAJOR.MINOR.PATCH.TWEAK` with NO
+        # release tag (matching `vBOARD.MAJOR.MINOR.PATCH` with NO
         # suffix — test/rc tags are skipped). "Relevant" = commit
         # subjects whose conventional-commit prefix is feat / fix /
         # perf / refactor / ci. chore / docs / style / test / build
