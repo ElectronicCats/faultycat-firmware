@@ -1073,15 +1073,18 @@ static void sump_on_exit_cb(void* u) {
     shell_print("\nSUMP: OK exited (back to text shell)\n");
 }
 
-// Debounce window for the disconnect-triggered SUMP teardown below.
+// Grace window for the disconnect-triggered SUMP teardown below.
 // Windows' usbser.sys driver drops DTR on CloseHandle() as part of its
-// normal cleanup, which also fires during the brief close/reopen race
-// between faultycmd releasing CDC2 and PulseView opening it — tearing
-// the session down on that transient drop loses SUMP mode before
-// PulseView gets a chance to resync (see
-// docs/WINDOWS_SUMP_DTR_ISSUE.md). Only tear down if the disconnect
-// outlives this window instead of acting on the first tick.
-#define SUMP_EXIT_DEBOUNCE_MS 750u
+// normal cleanup — unlike POSIX there's no HUPCL-equivalent to suppress
+// that, so the drop happens the instant faultycmd closes CDC2, well
+// before PulseView's GUI has even finished launching, let alone before
+// the operator clicks "Scan for devices" (see
+// docs/WINDOWS_SUMP_DTR_ISSUE.md). That means this isn't a brief
+// microsecond race to debounce: the realistic gap is however long it
+// takes a human to alt-tab to PulseView and click Scan, easily several
+// seconds. Give that whole human-paced window before tearing the
+// session down, rather than reacting to the first disconnected tick.
+#define SUMP_EXIT_GRACE_MS 60000u
 
 static uint32_t s_sump_disconnect_at_ms; // 0 == not currently pending exit
 
@@ -1915,9 +1918,9 @@ int main(void) {
             } else if (s_shell_mode == SHELL_MODE_SERPROG) {
                 sp_on_exit_cb(NULL);
             } else if (s_shell_mode == SHELL_MODE_SUMP) {
-                // Debounced exit — see SUMP_EXIT_DEBOUNCE_MS above.
-                // A reconnect before the window elapses (PulseView
-                // opening the port right after faultycmd releases it)
+                // Grace period, not a debounce — see SUMP_EXIT_GRACE_MS
+                // above. A reconnect before it elapses (PulseView
+                // opening the port once the operator clicks Scan)
                 // cancels this below instead of losing the session.
                 s_sump_disconnect_at_ms = hal_now_ms();
             }
@@ -1925,7 +1928,7 @@ int main(void) {
         if (conn) {
             s_sump_disconnect_at_ms = 0;
         } else if (s_shell_mode == SHELL_MODE_SUMP && s_sump_disconnect_at_ms != 0 &&
-                   (uint32_t)(hal_now_ms() - s_sump_disconnect_at_ms) >= SUMP_EXIT_DEBOUNCE_MS) {
+                   (uint32_t)(hal_now_ms() - s_sump_disconnect_at_ms) >= SUMP_EXIT_GRACE_MS) {
             sump_on_exit_cb(NULL);
             s_sump_disconnect_at_ms = 0;
         }
