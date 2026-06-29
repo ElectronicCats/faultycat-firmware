@@ -1073,6 +1073,18 @@ static void sump_on_exit_cb(void* u) {
     shell_print("\nSUMP: OK exited (back to text shell)\n");
 }
 
+// Debounce window for the disconnect-triggered SUMP teardown below.
+// Windows' usbser.sys driver drops DTR on CloseHandle() as part of its
+// normal cleanup, which also fires during the brief close/reopen race
+// between faultycmd releasing CDC2 and PulseView opening it — tearing
+// the session down on that transient drop loses SUMP mode before
+// PulseView gets a chance to resync (see
+// docs/WINDOWS_SUMP_DTR_ISSUE.md). Only tear down if the disconnect
+// outlives this window instead of acting on the first tick.
+#define SUMP_EXIT_DEBOUNCE_MS 750u
+
+static uint32_t s_sump_disconnect_at_ms; // 0 == not currently pending exit
+
 static const sump_ols_callbacks_t SUMP_CALLBACKS = {
     .write_byte = sump_write_byte_cb,
     .yield      = sump_yield_cb,
@@ -1903,8 +1915,19 @@ int main(void) {
             } else if (s_shell_mode == SHELL_MODE_SERPROG) {
                 sp_on_exit_cb(NULL);
             } else if (s_shell_mode == SHELL_MODE_SUMP) {
-                sump_on_exit_cb(NULL);
+                // Debounced exit — see SUMP_EXIT_DEBOUNCE_MS above.
+                // A reconnect before the window elapses (PulseView
+                // opening the port right after faultycmd releases it)
+                // cancels this below instead of losing the session.
+                s_sump_disconnect_at_ms = hal_now_ms();
             }
+        }
+        if (conn) {
+            s_sump_disconnect_at_ms = 0;
+        } else if (s_shell_mode == SHELL_MODE_SUMP && s_sump_disconnect_at_ms != 0 &&
+                   (uint32_t)(hal_now_ms() - s_sump_disconnect_at_ms) >= SUMP_EXIT_DEBOUNCE_MS) {
+            sump_on_exit_cb(NULL);
+            s_sump_disconnect_at_ms = 0;
         }
         last_scanner_conn = conn;
 
