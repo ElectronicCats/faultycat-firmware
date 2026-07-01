@@ -74,6 +74,67 @@ static const sump_ols_callbacks_t TEST_CB = {
     .user       = NULL,
 };
 
+// -----------------------------------------------------------------------------
+// Trigger-test fixtures. The fake DMA never copies bytes, so trigger-match
+// logic needs the ring poked with known samples directly (cast away const,
+// same test-only pattern as driving hal_fake_dma_channels[]) and the fake's
+// transfer_count driven to "reveal" how many are available — see reveal().
+// -----------------------------------------------------------------------------
+
+static void preload_ring(uint32_t offset, const uint8_t* bytes, size_t n) {
+    uint8_t* ring = (uint8_t*)i2c_la_buffer();
+    for (size_t i = 0; i < n; i++)
+        ring[(offset + i) % I2C_LA_CAPTURE_BUFFER_BYTES] = bytes[i];
+}
+
+// Make i2c_la_total() report `n` samples available, the way the DMA's
+// decrementing transfer_count does on hardware (i2c_la_total() ==
+// FOREVER - remaining).
+static void reveal(uint32_t n) {
+    int ch = claimed_dma_channel();
+    if (ch >= 0)
+        hal_fake_dma_set_transfer_count(ch, FOREVER - n);
+}
+
+// yield that reveals a fixed, bounded sample count each call — enough for
+// the wait loop to see the trigger and for streaming to finish, without
+// the pathological FOREVER of fix_yield (which would trip do_arm's
+// overflow skip-forward and move the cursor off the preloaded bytes).
+static uint32_t s_reveal_total;
+static void yield_reveal(void* u) {
+    (void)u;
+    s_yield_calls++;
+    reveal(s_reveal_total);
+}
+
+static const sump_ols_callbacks_t REVEAL_CB = {
+    .write_byte = fix_write,
+    .yield      = yield_reveal,
+    .on_exit    = NULL,
+    .user       = NULL,
+};
+
+// yield that keeps only idle samples visible for the first few polls, then
+// reveals the matching sample — models a real, drawn-out wait so the test
+// can prove do_arm pumps yield() while blocked instead of busy-looping.
+static void yield_delayed_trigger(void* u) {
+    (void)u;
+    s_yield_calls++;
+    if (s_yield_calls < 3)
+        reveal(2u); // only the two idle samples, no match yet
+    else if (s_yield_calls == 3)
+        reveal(4u); // start bit at index 2 now visible
+    else
+        reveal(6u); // enough to finish streaming n=4 from the trigger
+}
+
+static const sump_ols_callbacks_t DELAYED_CB = {
+    .write_byte = fix_write,
+    .yield      = yield_delayed_trigger,
+    .on_exit    = NULL,
+    .user       = NULL,
+};
+
 void setUp(void) {
     i2c_la_deinit();
     hal_fake_gpio_reset();
@@ -256,6 +317,105 @@ static void test_reset_when_idle_is_safe(void) {
 }
 
 // -----------------------------------------------------------------------------
+// Stage-0 basic trigger (CMD_SET_TRIGGER_MASK 0xC0 / VALUE 0xC1). PulseView
+// sends these when the user arms a capture with a trigger condition; with
+// none configured it sends neither, so trigger_mask stays 0 (match-anything)
+// and ARM starts immediately — see UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md.
+// -----------------------------------------------------------------------------
+
+// Regression guard for the backward-compat claim: no SET_TRIGGER_* sent, so
+// mask/value keep their zero default and the capture streams from sample 0
+// exactly like before triggering existed.
+static void test_no_trigger_configured_starts_immediately(void) {
+    sump_ols_init(&REVEAL_CB);
+
+    uint8_t pattern[20];
+    for (uint8_t i = 0; i < 20u; i++)
+        pattern[i] = (uint8_t)(0xA0u + i);
+    preload_ring(0u, pattern, sizeof(pattern));
+    s_reveal_total = 20u;
+
+    TEST_ASSERT_EQUAL_UINT8(0u, sump_ols_trigger_mask()); // default: match anything
+
+    uint8_t capture_size[] = {0x81u, 0x04u, 0x00u, 0x00u, 0x00u}; // readcount 5 => n=20
+    feed(capture_size, sizeof(capture_size));
+    uint8_t arm = 0x01u;
+    feed(&arm, 1u);
+
+    TEST_ASSERT_EQUAL_UINT32(20u, s_writes_len);
+    TEST_ASSERT_EQUAL_MEMORY(pattern, s_writes, 20u); // started at sample 0
+}
+
+// Mask/value are 4-byte little-endian args (like SET_DIVIDER); only the low
+// byte is kept (channels 0-7). Non-zero upper bytes confirm both the byte
+// order and that they're discarded.
+static void test_trigger_mask_value_parsed_from_wire(void) {
+    uint8_t set_mask[]  = {0xC0u, 0x81u, 0x00u, 0x00u, 0x00u};
+    uint8_t set_value[] = {0xC1u, 0x01u, 0xFFu, 0xFFu, 0xFFu};
+    feed(set_mask, sizeof(set_mask));
+    feed(set_value, sizeof(set_value));
+
+    TEST_ASSERT_EQUAL_UINT8(0x81u, sump_ols_trigger_mask());
+    TEST_ASSERT_EQUAL_UINT8(0x01u, sump_ols_trigger_value());
+    // Stream stays in sync afterward — the next real command still parses.
+    uint8_t cmd_id = 0x02u;
+    feed(&cmd_id, 1u);
+    TEST_ASSERT_EQUAL_UINT32(4u, s_writes_len);
+    TEST_ASSERT_EQUAL_MEMORY("1ALS", s_writes, 4u);
+}
+
+// Idle-high RX line (bit 0 = 1) then a start bit (bit 0 = 0): a mask/value
+// selecting "bit 0 low" must skip the idle samples and begin the stream at
+// the triggering sample, not sample 0.
+static void test_arm_waits_for_trigger_before_streaming(void) {
+    sump_ols_init(&REVEAL_CB);
+
+    uint8_t samples[] = {0x01u, 0x01u, 0x00u, 0xAAu, 0xBBu, 0xCCu};
+    preload_ring(0u, samples, sizeof(samples));
+    s_reveal_total = 6u;
+
+    uint8_t set_mask[]  = {0xC0u, 0x01u, 0x00u, 0x00u, 0x00u}; // watch bit 0
+    uint8_t set_value[] = {0xC1u, 0x00u, 0x00u, 0x00u, 0x00u}; // fire when it's 0
+    feed(set_mask, sizeof(set_mask));
+    feed(set_value, sizeof(set_value));
+
+    uint8_t capture_size[] = {0x81u, 0x00u, 0x00u, 0x00u, 0x00u}; // readcount 1 => n=4
+    feed(capture_size, sizeof(capture_size));
+    uint8_t arm = 0x01u;
+    feed(&arm, 1u);
+
+    uint8_t expect[] = {0x00u, 0xAAu, 0xBBu, 0xCCu}; // from index 2, not 0
+    TEST_ASSERT_EQUAL_UINT32(4u, s_writes_len);
+    TEST_ASSERT_EQUAL_MEMORY(expect, s_writes, 4u);
+}
+
+// A real trigger wait can span many samples; do_arm must keep calling
+// yield() (which pumps tud_task/USB) while blocked, not busy-loop. Reveal
+// only idle samples for the first polls, then the match, and confirm both
+// that yield fired repeatedly and that the capture unblocks and completes.
+static void test_arm_polls_yield_while_waiting_for_trigger(void) {
+    sump_ols_init(&DELAYED_CB);
+
+    uint8_t samples[] = {0x01u, 0x01u, 0x00u, 0xAAu, 0xBBu, 0xCCu};
+    preload_ring(0u, samples, sizeof(samples));
+
+    uint8_t set_mask[]  = {0xC0u, 0x01u, 0x00u, 0x00u, 0x00u};
+    uint8_t set_value[] = {0xC1u, 0x00u, 0x00u, 0x00u, 0x00u};
+    feed(set_mask, sizeof(set_mask));
+    feed(set_value, sizeof(set_value));
+
+    uint8_t capture_size[] = {0x81u, 0x00u, 0x00u, 0x00u, 0x00u}; // n=4
+    feed(capture_size, sizeof(capture_size));
+    uint8_t arm = 0x01u;
+    feed(&arm, 1u);
+
+    TEST_ASSERT_TRUE(s_yield_calls >= 3);       // polled while blocked waiting
+    TEST_ASSERT_EQUAL_UINT32(4u, s_writes_len); // then unblocked and finished
+    TEST_ASSERT_EQUAL_UINT8(0x00u, s_writes[0]); // started at the start bit
+    TEST_ASSERT_FALSE(sump_ols_is_capturing());
+}
+
+// -----------------------------------------------------------------------------
 // Runner
 // -----------------------------------------------------------------------------
 
@@ -276,6 +436,11 @@ int main(void) {
     RUN_TEST(test_unknown_short_command_is_ignored);
 
     RUN_TEST(test_reset_when_idle_is_safe);
+
+    RUN_TEST(test_no_trigger_configured_starts_immediately);
+    RUN_TEST(test_trigger_mask_value_parsed_from_wire);
+    RUN_TEST(test_arm_waits_for_trigger_before_streaming);
+    RUN_TEST(test_arm_polls_yield_while_waiting_for_trigger);
 
     return UNITY_END();
 }
