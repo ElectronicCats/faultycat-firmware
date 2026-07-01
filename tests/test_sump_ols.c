@@ -1,7 +1,7 @@
 // Unit tests for services/sump_ols — SUMP/OLS protocol subset over
-// services/i2c_core/i2c_la (see docs/I2C_LA_DMA_TIMER_PLAN.md §6).
+// services/logic_analyzer/logic_analyzer (see docs/I2C_LA_DMA_TIMER_PLAN.md §6).
 //
-// Like test_i2c_la.c, the fake DMA doesn't copy bytes, so these tests
+// Like test_logic_analyzer.c, the fake DMA doesn't copy bytes, so these tests
 // can't assert captured *values* — only that the protocol shape (exact
 // reply bytes for ID/metadata, byte counts for ARM, correct divider
 // math) is right. The fake's `transfer_count` is static unless we move
@@ -18,16 +18,14 @@
 #include "hal_fake_gpio.h"
 #include "hal_fake_pio.h"
 #include "hal_fake_time.h"
-#include "i2c_la.h"
+#include "logic_analyzer.h"
 #include "sump_ols.h"
 
-#define SDA     2u
-#define SCL     3u
 #define FOREVER 0xFFFFFFFFu
 
-// pio1/SM2 — see services/i2c_core/i2c_la.c.
-#define I2C_LA_PIO_INSTANCE 1u
-#define I2C_LA_PIO_SM       2u
+// pio1/SM2 — see services/logic_analyzer/logic_analyzer.c.
+#define LA_PIO_INSTANCE 1u
+#define LA_PIO_SM       2u
 
 // -----------------------------------------------------------------------------
 // Test fixtures
@@ -54,7 +52,7 @@ static void fix_write(uint8_t b, void* u) {
 }
 
 // Simulates the DMA ring having finished filling: drives the fake's
-// remaining count to 0 (i2c_la_total() == FOREVER) so do_arm()'s drain
+// remaining count to 0 (la_total() == FOREVER) so do_arm()'s drain
 // loop sees "everything requested is already available" on its second
 // pass, regardless of how large `n` is. Real hardware fills the ring
 // progressively; this fake only needs to prove the *count* streamed is
@@ -82,13 +80,13 @@ static const sump_ols_callbacks_t TEST_CB = {
 // -----------------------------------------------------------------------------
 
 static void preload_ring(uint32_t offset, const uint8_t* bytes, size_t n) {
-    uint8_t* ring = (uint8_t*)i2c_la_buffer();
+    uint8_t* ring = (uint8_t*)la_buffer();
     for (size_t i = 0; i < n; i++)
-        ring[(offset + i) % I2C_LA_CAPTURE_BUFFER_BYTES] = bytes[i];
+        ring[(offset + i) % LA_CAPTURE_BUFFER_BYTES] = bytes[i];
 }
 
-// Make i2c_la_total() report `n` samples available, the way the DMA's
-// decrementing transfer_count does on hardware (i2c_la_total() ==
+// Make la_total() report `n` samples available, the way the DMA's
+// decrementing transfer_count does on hardware (la_total() ==
 // FOREVER - remaining).
 static void reveal(uint32_t n) {
     int ch = claimed_dma_channel();
@@ -136,7 +134,7 @@ static const sump_ols_callbacks_t DELAYED_CB = {
 };
 
 void setUp(void) {
-    i2c_la_deinit();
+    la_deinit();
     hal_fake_gpio_reset();
     hal_fake_dma_reset();
     hal_fake_pio_reset();
@@ -145,7 +143,7 @@ void setUp(void) {
     s_yield_calls = 0;
     memset(s_writes, 0, sizeof(s_writes));
 
-    TEST_ASSERT_TRUE(i2c_la_init(SDA, SCL));
+    TEST_ASSERT_TRUE(la_init());
     sump_ols_init(&TEST_CB);
 }
 
@@ -173,7 +171,7 @@ static void test_id_replies_1als(void) {
 // CMD_METADATA (0x04) — minimal TLV: device name, 8 probes, sample
 // memory, max rate, protocol version, terminator. NUM_PROBES_LONG=8 is
 // the field that matters most (unitsize = (8+7)/8 = 1 byte/sample,
-// matching i2c_la's raw GPIO_IN[7:0] byte format).
+// matching logic_analyzer's raw GPIO_IN[7:0] byte format).
 // -----------------------------------------------------------------------------
 
 static void test_metadata_reports_8_probes_and_max_samples(void) {
@@ -214,8 +212,8 @@ static void test_metadata_reports_8_probes_and_max_samples(void) {
 // -----------------------------------------------------------------------------
 // CMD_SET_DIVIDER (0x80) — divider = CLOCK_RATE(100MHz)/samplerate - 1,
 // so interval_us = (divider+1)/100. Verified by checking the PIO SM
-// clkdiv i2c_la_start() actually programs on the next ARM (2 SM cycles
-// per sample — see services/i2c_core/i2c_la.c).
+// clkdiv la_start() actually programs on the next ARM (2 SM cycles
+// per sample — see services/logic_analyzer/logic_analyzer.c).
 // -----------------------------------------------------------------------------
 
 static void test_set_divider_feeds_interval_into_next_arm(void) {
@@ -228,7 +226,7 @@ static void test_set_divider_feeds_interval_into_next_arm(void) {
     feed(&arm, 1u);
 
     // clk_div = sys_clk(125MHz) * interval_us(100) / 1e6 / 2 = 6250.
-    const hal_fake_pio_sm_state_t* sm = &hal_fake_pio_insts[I2C_LA_PIO_INSTANCE].sm[I2C_LA_PIO_SM];
+    const hal_fake_pio_sm_state_t* sm = &hal_fake_pio_insts[LA_PIO_INSTANCE].sm[LA_PIO_SM];
     TEST_ASSERT_EQUAL_FLOAT(6250.0f, sm->last_cfg.clk_div);
 }
 
@@ -237,7 +235,7 @@ static void test_arm_without_set_divider_uses_default_interval(void) {
     feed(&arm, 1u);
 
     // den = 125MHz * 2us / 1e6 / 2 = 125.
-    const hal_fake_pio_sm_state_t* sm = &hal_fake_pio_insts[I2C_LA_PIO_INSTANCE].sm[I2C_LA_PIO_SM];
+    const hal_fake_pio_sm_state_t* sm = &hal_fake_pio_insts[LA_PIO_INSTANCE].sm[LA_PIO_SM];
     TEST_ASSERT_EQUAL_FLOAT(125.0f, sm->last_cfg.clk_div);
 }
 
@@ -409,8 +407,8 @@ static void test_arm_polls_yield_while_waiting_for_trigger(void) {
     uint8_t arm = 0x01u;
     feed(&arm, 1u);
 
-    TEST_ASSERT_TRUE(s_yield_calls >= 3);       // polled while blocked waiting
-    TEST_ASSERT_EQUAL_UINT32(4u, s_writes_len); // then unblocked and finished
+    TEST_ASSERT_TRUE(s_yield_calls >= 3);        // polled while blocked waiting
+    TEST_ASSERT_EQUAL_UINT32(4u, s_writes_len);  // then unblocked and finished
     TEST_ASSERT_EQUAL_UINT8(0x00u, s_writes[0]); // started at the start bit
     TEST_ASSERT_FALSE(sump_ols_is_capturing());
 }

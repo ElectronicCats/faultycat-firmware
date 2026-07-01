@@ -47,7 +47,7 @@ typedef struct {
     uint16_t last_exec_instr;
     uint32_t set_clkdiv_int_calls;
     uint32_t last_clkdiv_int;
-    // Added for i2c_la's PIO+DMA capture path: a stable per-SM "address"
+    // Added for logic_analyzer's PIO+DMA capture path: a stable per-SM "address"
     // (the rx_fifo array itself) so hal_pio_sm_rxfifo_register() returns
     // a pointer tests can compare against the fake DMA channel's src.
 } hal_fake_pio_sm_state_t;

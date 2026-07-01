@@ -250,38 +250,38 @@ endfunction()
 
 faultycat_add_service_swd_bus_lock_test(test_swd_bus_lock)
 
-# I2C logic analyzer — passive sampler, sibling of i2c_core (see
-# docs/I2C_LOGIC_ANALYZER_PLAN.md). Links i2c_la.c only — independent
-# lifecycle from the bit-bang master.
-function(faultycat_add_service_i2c_la_test name)
+# Logic analyzer — passive, protocol-agnostic sampler (see
+# docs/LOGIC_ANALYZER.md). Links logic_analyzer.c only — independent
+# lifecycle, raw GP0..GP7 capture with host-side decode.
+function(faultycat_add_service_logic_analyzer_test name)
     add_executable(${name}
         ${name}.c
-        ${CMAKE_SOURCE_DIR}/services/i2c_core/i2c_la.c
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer/logic_analyzer.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/drivers/include
-        ${CMAKE_SOURCE_DIR}/services/i2c_core
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer
     )
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-faultycat_add_service_i2c_la_test(test_i2c_la)
+faultycat_add_service_logic_analyzer_test(test_logic_analyzer)
 
-# SUMP/OLS — PulseView/sigrok protocol subset over i2c_la (see
-# docs/I2C_LA_DMA_TIMER_PLAN.md §6). Links i2c_la.c too since
+# SUMP/OLS — PulseView/sigrok protocol subset over logic_analyzer (see
+# docs/I2C_LA_DMA_TIMER_PLAN.md §6). Links logic_analyzer.c too since
 # sump_ols.c calls into it directly (init/start/stop/total/buffer).
 function(faultycat_add_service_sump_ols_test name)
     add_executable(${name}
         ${name}.c
         ${CMAKE_SOURCE_DIR}/services/sump_ols/sump_ols.c
-        ${CMAKE_SOURCE_DIR}/services/i2c_core/i2c_la.c
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer/logic_analyzer.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/drivers/include
         ${CMAKE_SOURCE_DIR}/services/sump_ols
-        ${CMAKE_SOURCE_DIR}/services/i2c_core
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer
     )
     add_test(NAME ${name} COMMAND ${name})
 endfunction()

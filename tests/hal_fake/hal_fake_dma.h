@@ -35,7 +35,7 @@ extern hal_fake_dma_timer_state_t hal_fake_dma_timers[HAL_FAKE_DMA_TIMERS];
 void hal_fake_dma_reset(void);
 
 // Test-only hooks to let tests poke is_busy and transfer_count. Continuous
-// consumers (i2c_la, emfi_capture) read progress via the decrementing
+// consumers (logic_analyzer, emfi_capture) read progress via the decrementing
 // transfer_count, so tests simulate paced samples with set_transfer_count.
 void hal_fake_dma_set_busy(hal_dma_channel_t ch, bool busy);
 void hal_fake_dma_set_transfer_count(hal_dma_channel_t ch, uint32_t n);
