@@ -10,5 +10,5 @@ target_include_directories(service_sump_ols
 target_link_libraries(service_sump_ols
     PUBLIC
         hal_rp2040
-        service_i2c
+        service_logic_analyzer
 )

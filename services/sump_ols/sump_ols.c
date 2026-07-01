@@ -1,6 +1,6 @@
 /*
  * services/sump_ols/sump_ols.c — SUMP/OLS protocol subset over
- * services/i2c_core/i2c_la.c, streaming flavour.
+ * services/logic_analyzer/logic_analyzer.c, streaming flavour.
  *
  * Protocol command/metadata-token values and the little-endian
  * long-command argument layout were confirmed against the live
@@ -13,7 +13,7 @@
 
 #include <string.h>
 
-#include "i2c_la.h"
+#include "logic_analyzer.h"
 
 #define CMD_RESET             0x00u
 #define CMD_ARM_BASIC_TRIGGER 0x01u
@@ -51,14 +51,14 @@
 typedef struct {
     sump_ols_callbacks_t cb;
     sump_ols_state_t state;
-    uint32_t arg_acc;     // little-endian accumulator for the long
-                          // command currently being read.
-    uint32_t interval_us; // from the last CMD_SET_DIVIDER.
-    uint32_t n_samples;   // from the last CMD_CAPTURE_SIZE.
-    uint8_t trigger_mask; // stage-0 basic trigger; NUM_PROBES_LONG=8 so
+    uint32_t arg_acc;      // little-endian accumulator for the long
+                           // command currently being read.
+    uint32_t interval_us;  // from the last CMD_SET_DIVIDER.
+    uint32_t n_samples;    // from the last CMD_CAPTURE_SIZE.
+    uint8_t trigger_mask;  // stage-0 basic trigger; NUM_PROBES_LONG=8 so
     uint8_t trigger_value; // one byte covers every exposed channel.
                            // mask == 0 (memset default) = match anything.
-    bool capturing;       // true for the whole ARM wait+stream duration.
+    bool capturing;        // true for the whole ARM wait+stream duration.
 } sump_t;
 
 static sump_t s_sump;
@@ -91,10 +91,11 @@ static void yield_if_due(uint32_t i) {
 }
 
 // -----------------------------------------------------------------------------
-// CMD_METADATA reply — minimal TLV set. NUM_PROBES_LONG=8 is the
-// field that matters most: it tells the host unitsize = (8+7)/8 = 1
-// byte/sample, matching i2c_la's raw GPIO_IN[7:0] byte-per-sample
-// format. Sigrok's scan() treats metadata as optional (falls back to
+// CMD_METADATA reply — minimal TLV set. NUM_PROBES_LONG (=8,
+// LA_CHANNEL_COUNT) is the field that matters most: it tells the host
+// unitsize = (8+7)/8 = 1 byte/sample, matching logic_analyzer's raw
+// GPIO_IN[7:0] byte-per-sample format. Sigrok's scan() treats metadata
+// as optional (falls back to
 // a 32-channel generic-SUMP guess if absent), so skipping this would
 // silently corrupt every capture's channel decode — not skippable.
 // -----------------------------------------------------------------------------
@@ -111,13 +112,13 @@ static void emit_metadata(void) {
     emit_n((const uint8_t*)SUMP_OLS_DEVICE_NAME, sizeof(SUMP_OLS_DEVICE_NAME)); // incl. NUL
 
     emit(METADATA_TOKEN_NUM_PROBES_LONG);
-    emit_be32(8u);
+    emit_be32(LA_CHANNEL_COUNT);
 
     emit(METADATA_TOKEN_SAMPLE_MEMORY_BYTES);
     emit_be32(SUMP_OLS_MAX_SAMPLES);
 
     // DMA-timer pacing is limited in practice by sample_interval_us
-    // granularity (1us minimum, see i2c_la.c's divisor_for) — report
+    // granularity (1us minimum, see logic_analyzer.c's divisor_for) — report
     // 1 MHz as the ceiling rather than an unachievable peripheral
     // clock rate.
     emit(METADATA_TOKEN_MAX_SAMPLE_RATE_HZ);
@@ -131,24 +132,24 @@ static void emit_metadata(void) {
 
 // -----------------------------------------------------------------------------
 // CMD_ARM_BASIC_TRIGGER — synchronous capture + raw stream, same
-// ring-drain shape as apps/faultycat_fw/main.c::cmd_i2c_la but binary
+// ring-drain shape as apps/faultycat_fw/main.c::cmd_la but binary
 // (no hex/ASCII framing) and via the yield callback instead of a
 // direct usb_composite_task() call.
 // -----------------------------------------------------------------------------
 
 static void do_arm(void) {
-    if (!i2c_la_is_inited())
+    if (!la_is_inited())
         return; // can't happen via main.c's mode-switch gate, but cheap to guard.
 
     uint32_t interval_us =
         (s_sump.interval_us != 0u) ? s_sump.interval_us : SUMP_OLS_DEFAULT_INTERVAL_US;
     uint32_t n = (s_sump.n_samples != 0u) ? s_sump.n_samples : SUMP_OLS_DEFAULT_N_SAMPLES;
 
-    if (!i2c_la_start(interval_us))
+    if (!la_start(interval_us))
         return;
 
     s_sump.capturing   = true;
-    const uint8_t* buf = i2c_la_buffer();
+    const uint8_t* buf = la_buffer();
     uint32_t cursor    = 0u;
     uint32_t streamed  = 0u;
 
@@ -159,16 +160,16 @@ static void do_arm(void) {
     // streaming loop below just resumes from cursor 0. See
     // docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md.
     for (;;) {
-        uint32_t written = i2c_la_total();
-        if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+        uint32_t written = la_total();
+        if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
             // DMA lapped the unconsumed pre-trigger region — skip to the
             // oldest sample still in the ring, same best-effort drop the
             // streaming loop does below.
-            cursor = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+            cursor = written - LA_CAPTURE_BUFFER_BYTES;
         }
         bool matched = false;
         while (cursor < written) {
-            uint8_t s = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
+            uint8_t s = buf[cursor % LA_CAPTURE_BUFFER_BYTES];
             if ((s & s_sump.trigger_mask) == (s_sump.trigger_value & s_sump.trigger_mask)) {
                 matched = true; // cursor now points at the triggering sample
                 break;
@@ -182,7 +183,7 @@ static void do_arm(void) {
     }
 
     while (streamed < n) {
-        uint32_t written   = i2c_la_total();
+        uint32_t written   = la_total();
         uint32_t remaining = n - streamed;
         // Cap the live write head to (cursor + remaining), not an
         // absolute sample index: with a trigger the capture starts at
@@ -190,15 +191,15 @@ static void do_arm(void) {
         // n` cap would stop short by exactly the pre-trigger offset.
         if (written - cursor > remaining)
             written = cursor + remaining;
-        if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+        if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
             // DMA lapped the cursor — those samples are gone. Skip to
             // the oldest still in the ring; SUMP has no in-band
             // overflow signal so this is silently best-effort, same
-            // tradeoff cmd_i2c_la's OVERFLOW text just makes visible.
-            cursor = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+            // tradeoff cmd_la's OVERFLOW text just makes visible.
+            cursor = written - LA_CAPTURE_BUFFER_BYTES;
         }
         while (cursor < written) {
-            emit(buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES]);
+            emit(buf[cursor % LA_CAPTURE_BUFFER_BYTES]);
             cursor++;
             streamed++;
             yield_if_due(streamed - 1u);
@@ -207,7 +208,7 @@ static void do_arm(void) {
             s_sump.cb.yield(s_sump.cb.user);
     }
 
-    i2c_la_stop();
+    la_stop();
     s_sump.capturing = false;
 }
 
@@ -244,7 +245,7 @@ void sump_ols_feed_byte(uint8_t b) {
             switch (b) {
                 case CMD_RESET:
                     if (s_sump.capturing) {
-                        i2c_la_stop();
+                        la_stop();
                         s_sump.capturing = false;
                     }
                     return;

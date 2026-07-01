@@ -5,18 +5,18 @@
 #include <stdint.h>
 
 // services/sump_ols — SUMP/OLS ("Openbench Logic Sniffer") protocol,
-// streaming flavour, layered on top of services/i2c_core/i2c_la.c.
+// streaming flavour, layered on top of services/logic_analyzer/logic_analyzer.c.
 //
 // Why this exists: PulseView/sigrok ship the "ols" driver out of the
 // box, which speaks the classic SUMP serial protocol with no
 // configuration needed beyond picking a serial port — see
 // docs/I2C_LA_DMA_TIMER_PLAN.md §6. Implementing this subset lets
-// PulseView drive `i2c_la` directly instead of needing a bespoke
+// PulseView drive `logic_analyzer` directly instead of needing a bespoke
 // sigrok driver or Python client.
 //
 // Mode-switch shape is identical to buspirate_compat / flashrom_serprog
 // (apps/faultycat_fw/main.c): a text command on the CDC2 shell
-// (`i2c la sump enter <sda> <scl>`) calls i2c_la_init() and flips
+// (`la sump enter`) calls la_init() and flips
 // SHELL_MODE_SUMP; every subsequent byte is fed here instead of the
 // line parser. Like serprog, SUMP has no in-band escape byte back to
 // text mode, so leaving the mode relies on host DTR-drop detection
@@ -92,7 +92,7 @@ sump_ols_state_t sump_ols_get_state(void);
 // True iff an ARM-triggered capture is currently streaming (i.e. a
 // sump_ols_feed_byte(CMD_ARM_BASIC_TRIGGER) call hasn't returned yet).
 // Always false from outside feed_byte itself — capture runs to
-// completion synchronously inside the ARM call, same as cmd_i2c_la.
+// completion synchronously inside the ARM call, same as cmd_la.
 // Exposed for tests only.
 bool sump_ols_is_capturing(void);
 
@@ -111,13 +111,13 @@ uint8_t sump_ols_trigger_value(void);
 
 // Device name reported in metadata token 0x01 (DEVICE_NAME, ASCII +
 // NUL). Exposed for tests/docs.
-#define SUMP_OLS_DEVICE_NAME "FaultyCat I2C LA"
+#define SUMP_OLS_DEVICE_NAME "FaultyCat LA"
 
 // Maximum sample count the SUMP CMD_CAPTURE_SIZE encoding can express:
 // readcount is a uint16 (max 65536), stored in units of 4 samples →
 // 65536 * 4 = 262144.  Reported in CMD_METADATA SAMPLE_MEMORY_BYTES so
 // PulseView lets the user select up to this value.  The ring buffer
-// (I2C_LA_CAPTURE_BUFFER_BYTES) is just the DMA sliding window; the
+// (LA_CAPTURE_BUFFER_BYTES) is just the DMA sliding window; the
 // streaming loop in do_arm() handles n_samples well beyond that size as
 // long as USB can drain it fast enough.
 #define SUMP_OLS_MAX_SAMPLES 262144u

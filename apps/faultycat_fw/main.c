@@ -30,7 +30,7 @@
 #include "hal/uart.h"
 #include "hv_charger.h"
 #include "i2c_core.h"
-#include "i2c_la.h"
+#include "logic_analyzer.h"
 #include "jtag_core.h"
 #include "board_v2.h"
 #include "pinout_scanner.h"
@@ -183,8 +183,12 @@ static void shell_help(void) {
     shell_print("SHELL:   scan i2c                                    P(8,2)=56 perms\n");
     shell_print(
         "SHELL:   i2c probe <sda> <scl>                       rescan addrs on known pins\n");
+    shell_print("SHELL: --- Logic analyzer (protocol-agnostic, GP0..GP7) ---\n");
     shell_print(
-        "SHELL:   i2c la <sda> <scl> <us> <n> [bin]            capture SDA/SCL, hex/binary dump\n");
+        "SHELL:   la <us> <n> [bin]                           raw GP0..GP7 capture, hex/binary\n");
+    shell_print(
+        "SHELL:   la sump enter                               SUMP/OLS for PulseView/sigrok\n");
+    shell_print("SHELL:                                                exit on host disconnect\n");
     shell_print("SHELL: --- Campaign (F9) ---\n");
     shell_print("SHELL:   campaign status                              show state + counters\n");
     shell_print("SHELL:   campaign stop                                halt running sweep\n");
@@ -199,18 +203,11 @@ static void shell_help(void) {
     shell_print("SHELL:   serprog enter [<cs> <mosi> <miso> <sck>]     flashrom serprog (F8-5)\n");
     shell_print("SHELL:                                                defaults: 0 1 2 3, exit on "
                 "host disconnect\n");
-    shell_print(
-        "SHELL:   i2c la sump enter <sda> <scl>                SUMP/OLS for PulseView/sigrok\n");
-    shell_print("SHELL:                                                exit on host disconnect\n");
     shell_print("SHELL: --- UART passthrough (Target UART CDC) ---\n");
     shell_print(
         "SHELL:   uart enter [<baud> <n|e|o> <1|2>]            CH0=TX/CH1=RX, default 115200 N1\n");
     shell_print("SHELL:   uart baud <n> | parity <n|e|o> | stopbits <1|2>   live reconfigure\n");
     shell_print("SHELL:   uart status | exit\n");
-    shell_print(
-        "SHELL:   uart la <rx> <tx> <us> <n> [bin]         raw GPIO capture, hex/binary dump\n");
-    shell_print(
-        "SHELL:   uart la sump enter <rx> <tx>             SUMP/OLS for PulseView/sigrok\n");
     shell_print("SHELL: NOTE: JTAG and direct-SWD verbs (jtag *, swd *, scan jtag) are\n");
     shell_print("SHELL:       WIP and disabled in this release — they will respond `ERR wip`.\n");
 }
@@ -704,22 +701,24 @@ static void cmd_i2c_probe(int argc, char** argv) {
 }
 
 // -----------------------------------------------------------------------------
-// I2C passive logic analyzer — `i2c la <sda> <scl> <us> <n>` (Option A from
-// docs/I2C_LOGIC_ANALYZER_PLAN.md §"Salida sobre CDC2"): streams samples as
-// plain hex text over the existing shell — no new protocol, no SHELL_MODE_*
-// switch. The driver captures continuously into a ring buffer
-// (docs/I2C_LA_DMA_TIMER_PLAN.md); this command drains that ring to USB as
-// it fills, so `n` (total samples) is no longer capped at the buffer size.
+// Passive digital logic analyzer — `la <us> <n> [bin]` (Option A from
+// docs/I2C_LOGIC_ANALYZER_PLAN.md §"Salida sobre CDC2"): streams raw GP0..GP7
+// samples as plain hex text (or binary) over the existing shell — no new
+// protocol, no SHELL_MODE_* switch. Protocol-agnostic: decode happens
+// host-side (see docs/LOGIC_ANALYZER.md). The driver captures continuously
+// into a ring buffer (docs/I2C_LA_DMA_TIMER_PLAN.md); this command drains
+// that ring to USB as it fills, so `n` (total samples) is no longer capped
+// at the buffer size.
 // -----------------------------------------------------------------------------
 
 // Upper bound on retrying a stalled USB write (host not draining, USB
 // glitch). Without this, a TX ring buffer that never frees up would
-// spin cmd_i2c_la's retry loop forever and wedge the whole shell, not
+// spin cmd_la's retry loop forever and wedge the whole shell, not
 // just this command — worse than the short/garbled hexdump it replaces.
 // 5s gives a slow/loaded host (e.g. pyserial polling in small chunks)
 // enough room to drain a full buffer's worth of samples without the
 // firmware giving up mid-transfer.
-#define I2C_LA_WRITE_RETRY_MAX_MS 5000u
+#define LA_WRITE_RETRY_MAX_MS 5000u
 
 // Write `len` bytes to the scanner CDC, retrying partial writes while
 // pumping USB. tud_cdc_n_write() (behind usb_composite_cdc_write) silently
@@ -728,14 +727,14 @@ static void cmd_i2c_probe(int argc, char** argv) {
 // partial writes must be retried or the host sees a short, garbled hex
 // stream. hal_busy_wait_us() does NOT service tud_task, so usb_composite_
 // task() is pumped here or the TX FIFO completion never frees the ring.
-// Returns false (and gives up) once I2C_LA_WRITE_RETRY_MAX_MS elapses.
-static bool i2c_la_cdc_write_all(const char* data, size_t len) {
+// Returns false (and gives up) once LA_WRITE_RETRY_MAX_MS elapses.
+static bool la_cdc_write_all(const char* data, size_t len) {
     size_t off           = 0;
     uint32_t write_start = hal_now_ms();
     while (off < len) {
         off += usb_composite_cdc_write(USB_CDC_SCANNER, data + off, len - off);
         if (off < len) {
-            if ((uint32_t)(hal_now_ms() - write_start) >= I2C_LA_WRITE_RETRY_MAX_MS)
+            if ((uint32_t)(hal_now_ms() - write_start) >= LA_WRITE_RETRY_MAX_MS)
                 return false;
             usb_composite_task();
             hal_busy_wait_us(1000);
@@ -744,44 +743,43 @@ static bool i2c_la_cdc_write_all(const char* data, size_t len) {
     return true;
 }
 
-// Drains i2c_la's ring to the scanner CDC for exactly `n` samples, then
-// stops/deinits the capture and releases the SWD bus owner token. Shared by
-// cmd_i2c_la/cmd_uart_la — identical loop, only the summary line printed
-// before this runs differs between the two callers.
+// Drains the logic analyzer's ring to the scanner CDC for exactly `n`
+// samples, then stops/deinits the capture and releases the SWD bus owner
+// token. Used by cmd_la after it prints the summary line.
 //
 // `binary`: false sends each sample as 2 hex chars (human-readable, safe
 // over a text shell, but ~2x the bytes-on-wire of the raw samples — at fast
 // sample rates this can exceed USB FS CDC throughput before the firmware's
-// own ring even laps, see I2C_LA_CAPTURE_BUFFER_BYTES). true sends the raw
+// own ring even laps, see LA_CAPTURE_BUFFER_BYTES). true sends the raw
 // sample bytes verbatim, halving the wire bytes so 1us/sample captures have
 // headroom to keep up. Either way the host already knows `n` from the
 // summary line it just received, so it reads exactly `n` bytes (binary) or
 // `n*2` hex chars (text) — no in-band framing needed for either format.
 static void la_stream_and_finish(uint32_t n, bool binary) {
-    const uint8_t* buf = i2c_la_buffer();
+    const uint8_t* buf = la_buffer();
     uint32_t cursor    = 0u; // samples already streamed
     bool overflow      = false;
     bool gave_up       = false;
 
     // Drain the ring continuously until n samples have streamed. The PIO
-    // SM paces samples regardless of bus activity, so i2c_la_total()
+    // SM paces samples regardless of bus activity, so la_total()
     // always advances and this loop always terminates at n.
     if (binary) {
         uint8_t chunk[64];
         size_t pos = 0;
         while (cursor < n && !gave_up) {
-            uint32_t written = i2c_la_total();
+            uint32_t written = la_total();
             if (written > n)
                 written = n;
-            if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+            if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
                 overflow = true;
-                cursor   = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+                cursor   = written - LA_CAPTURE_BUFFER_BYTES;
             }
             while (cursor < written) {
-                chunk[pos++] = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
+                chunk[pos++] = buf[cursor % LA_CAPTURE_BUFFER_BYTES];
                 cursor++;
                 if (pos >= sizeof(chunk)) {
-                    if (!i2c_la_cdc_write_all((const char*)chunk, pos)) {
+                    if (!la_cdc_write_all((const char*)chunk, pos)) {
                         gave_up = true;
                         break;
                     }
@@ -791,27 +789,27 @@ static void la_stream_and_finish(uint32_t n, bool binary) {
             usb_composite_task();
         }
         if (pos > 0u && !gave_up)
-            i2c_la_cdc_write_all((const char*)chunk, pos);
+            la_cdc_write_all((const char*)chunk, pos);
     } else {
         char line[80];
         size_t pos = 0;
         while (cursor < n && !gave_up) {
-            uint32_t written = i2c_la_total();
+            uint32_t written = la_total();
             if (written > n)
                 written = n; // don't stream past the requested count
             // If the DMA lapped the cursor, those samples are gone — skip
             // to the oldest still in the ring and flag it once.
-            if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+            if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
                 overflow = true;
-                cursor   = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+                cursor   = written - LA_CAPTURE_BUFFER_BYTES;
             }
             while (cursor < written) {
-                uint8_t b = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
+                uint8_t b = buf[cursor % LA_CAPTURE_BUFFER_BYTES];
                 pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", b);
                 cursor++;
                 if (pos >= sizeof(line) - 4) {
                     line[pos++] = '\n';
-                    if (!i2c_la_cdc_write_all(line, pos)) {
+                    if (!la_cdc_write_all(line, pos)) {
                         gave_up = true;
                         break;
                     }
@@ -823,12 +821,12 @@ static void la_stream_and_finish(uint32_t n, bool binary) {
         }
         if (pos > 0u && !gave_up) {
             line[pos++] = '\n';
-            i2c_la_cdc_write_all(line, pos);
+            la_cdc_write_all(line, pos);
         }
     }
 
-    i2c_la_stop();
-    i2c_la_deinit();
+    la_stop();
+    la_deinit();
     swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
 
     if (gave_up)
@@ -837,66 +835,56 @@ static void la_stream_and_finish(uint32_t n, bool binary) {
         usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nOVERFLOW\n");
 }
 
-static void cmd_i2c_la(int argc, char** argv) {
-    if (argc < 6) {
-        shell_print("I2C: ERR usage: i2c la <sda> <scl> <us> <n> [bin]\n");
+// `la <us> <n> [bin]` — protocol-agnostic raw capture of GP0..GP7.
+// Always samples the full 8-channel bank; which channel carries which
+// signal is up to how the operator wires the header (see
+// docs/LOGIC_ANALYZER.md). For host-side protocol decode use `la sump
+// enter` (PulseView) instead.
+static void cmd_la(int argc, char** argv) {
+    if (argc < 3) {
+        shell_print("LA: ERR usage: la <us> <n> [bin]\n");
         return;
     }
-    if (shell_bus_busy("I2C"))
+    if (shell_bus_busy("LA"))
         return;
-    uint8_t sda = (uint8_t)strtoul(argv[2], NULL, 0);
-    uint8_t scl = (uint8_t)strtoul(argv[3], NULL, 0);
-    uint32_t us = (uint32_t)strtoul(argv[4], NULL, 0);
-    uint32_t n  = (uint32_t)strtoul(argv[5], NULL, 0);
-    bool binary = (argc >= 7 && !strcmp(argv[6], "bin"));
+    uint32_t us = (uint32_t)strtoul(argv[1], NULL, 0);
+    uint32_t n  = (uint32_t)strtoul(argv[2], NULL, 0);
+    bool binary = (argc >= 4 && !strcmp(argv[3], "bin"));
     if (n == 0u) {
-        shell_print("I2C: ERR n must be > 0\n");
+        shell_print("LA: ERR n must be > 0\n");
         return;
     }
     if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
-        shell_print("I2C: ERR bus_busy (held by another service)\n");
+        shell_print("LA: ERR bus_busy (held by another service)\n");
         return;
     }
-    if (!i2c_la_init(sda, scl)) {
-        shell_print("I2C: ERR init_failed (pin range or duplicate?)\n");
+    if (!la_init()) {
+        shell_print("LA: ERR init_failed\n");
         swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
         return;
     }
-    if (!i2c_la_start(us)) {
-        shell_print("I2C: ERR start_failed\n");
-        i2c_la_deinit();
+    if (!la_start(us)) {
+        shell_print("LA: ERR start_failed\n");
+        la_deinit();
         swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
         return;
     }
 
-    shell_printf("I2C: LA OK sda=GP%u scl=GP%u stream n=%lu interval_us=%lu\n", sda, scl,
-                 (unsigned long)n, (unsigned long)us);
+    shell_printf("LA: OK capture ch=GP0..GP7 stream n=%lu interval_us=%lu\n", (unsigned long)n,
+                 (unsigned long)us);
 
     la_stream_and_finish(n, binary);
 }
 
-// Defined below (SUMP/OLS section) — forward-declared so this
-// dispatcher can route `i2c la sump enter ...` to it ahead of its
-// definition.
-static void process_i2c_la_sump_subcmd(int argc, char** argv);
-
 static void process_i2c_subcmd(int argc, char** argv) {
     if (argc < 2) {
-        shell_print("I2C: ERR i2c needs subcommand: probe, la\n");
+        shell_print("I2C: ERR i2c needs subcommand: probe\n");
         return;
     }
     const char* sub = argv[1];
     if (!strcmp(sub, "probe"))
         cmd_i2c_probe(argc, argv);
-    else if (!strcmp(sub, "la")) {
-        // `i2c la sump enter <sda> <scl>` vs. the plain
-        // `i2c la <sda> <scl> <us> <n>` hexdump capture — argv[2]
-        // disambiguates (a pin number vs. the literal "sump").
-        if (argc >= 3 && !strcmp(argv[2], "sump"))
-            process_i2c_la_sump_subcmd(argc, argv);
-        else
-            cmd_i2c_la(argc, argv);
-    } else
+    else
         shell_printf("I2C: ERR unknown_subcmd: %s (try `?`)\n", sub);
 }
 
@@ -1086,12 +1074,12 @@ static void process_serprog_subcmd(int argc, char** argv) {
 }
 
 // -----------------------------------------------------------------------------
-// SUMP/OLS — i2c_la over the classic SUMP serial protocol, so
-// PulseView/sigrok's stock "ols" driver can drive it directly (see
+// SUMP/OLS — the logic analyzer over the classic SUMP serial protocol,
+// so PulseView/sigrok's stock "ols" driver can drive it directly (see
 // docs/I2C_LA_DMA_TIMER_PLAN.md §6). Like serprog, SUMP has no in-band
 // exit byte, so leaving the mode depends on the DTR-drop disconnect
 // hook below. UX note (deliberate tradeoff, see plan doc): the
-// operator must send `i2c la sump enter` and then point
+// operator must send `la sump enter` and then point
 // PulseView/sigrok-cli at the same port before anything drops DTR —
 // if it drops first, the firmware reverts to the text shell and the
 // enter command has to be resent.
@@ -1101,12 +1089,12 @@ static void process_serprog_subcmd(int argc, char** argv) {
 // 50 kHz+ capture rate, flushing a single byte over USB per call (as this
 // used to do) can't keep up with the PIO/DMA producer — that congestion is
 // the steady state at realistic sample rates, not a rare glitch, so a
-// per-byte retry-then-give-up (formerly up to I2C_LA_WRITE_RETRY_MAX_MS =
+// per-byte retry-then-give-up (formerly up to LA_WRITE_RETRY_MAX_MS =
 // 5s on *every* byte) could stall a capture for minutes to hours instead of
 // the few seconds PulseView expects, with the host seeing no data and
 // eventually giving up. Buffer into SUMP_WRITE_CHUNK_BYTES-sized chunks —
 // same size as la_stream_and_finish's binary chunk — and flush with
-// i2c_la_cdc_write_all(), which retries/gives-up once per chunk instead of
+// la_cdc_write_all(), which retries/gives-up once per chunk instead of
 // once per byte. do_arm() calls the yield callback right after streaming
 // the last sample of a capture (see its outer while loop), so flushing the
 // pending chunk from sump_yield_cb also guarantees the final partial chunk
@@ -1129,7 +1117,7 @@ static size_t s_sump_write_chunk_len = 0u;
 static void sump_flush_write_chunk(void) {
     if (s_sump_write_chunk_len == 0u)
         return;
-    i2c_la_cdc_write_all((const char*)s_sump_write_chunk, s_sump_write_chunk_len);
+    la_cdc_write_all((const char*)s_sump_write_chunk, s_sump_write_chunk_len);
     s_sump_write_chunk_len = 0u;
 }
 
@@ -1138,7 +1126,7 @@ static void sump_write_byte_cb(uint8_t b, void* u) {
     if (!sump_ols_is_capturing()) {
         // Not a sample stream (ID reply, metadata, ...) — these are short,
         // infrequent, and have no other flush point, so send immediately.
-        i2c_la_cdc_write_all((const char*)&b, 1);
+        la_cdc_write_all((const char*)&b, 1);
         return;
     }
     s_sump_write_chunk[s_sump_write_chunk_len++] = b;
@@ -1167,8 +1155,8 @@ static void sump_on_exit_cb(void* u) {
     // Safety net: do_arm() always yields after its last write_byte (see
     // above), but flush here too in case that invariant ever changes.
     sump_flush_write_chunk();
-    i2c_la_stop();
-    i2c_la_deinit();
+    la_stop();
+    la_deinit();
     swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
     s_shell_mode = SHELL_MODE_TEXT;
     shell_print("\nSUMP: OK exited (back to text shell)\n");
@@ -1196,108 +1184,34 @@ static const sump_ols_callbacks_t SUMP_CALLBACKS = {
     .user       = NULL,
 };
 
-static void process_i2c_la_sump_subcmd(int argc, char** argv) {
-    // argv: i2c la sump enter <sda> <scl>
-    if (argc < 6 || strcmp(argv[3], "enter") != 0) {
-        shell_print("I2C: ERR usage: i2c la sump enter <sda> <scl>\n");
+// `la sump enter` — enter SUMP/OLS mode for PulseView/sigrok. Captures
+// the full GP0..GP7 bank; the operator wires whichever signals they want
+// and picks the matching decoder host-side (see docs/LOGIC_ANALYZER.md).
+// The SUMP callbacks and grace-period disconnect logic defined above
+// already apply to any SHELL_MODE_SUMP session, so no main-loop changes
+// are needed for the SUMP path.
+static void cmd_la_sump_enter(int argc, char** argv) {
+    // argv: la sump enter
+    if (argc < 3 || strcmp(argv[2], "enter") != 0) {
+        shell_print("LA: ERR usage: la sump enter\n");
         return;
     }
-    if (shell_bus_busy("I2C"))
+    if (shell_bus_busy("LA"))
         return;
-    uint8_t sda = (uint8_t)strtoul(argv[4], NULL, 0);
-    uint8_t scl = (uint8_t)strtoul(argv[5], NULL, 0);
     if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
-        shell_print("I2C: ERR bus_busy (held by another service)\n");
+        shell_print("LA: ERR bus_busy (held by another service)\n");
         return;
     }
-    if (!i2c_la_init(sda, scl)) {
-        shell_print("I2C: ERR init_failed (pin range or duplicate?)\n");
+    if (!la_init()) {
+        shell_print("LA: ERR init_failed\n");
         swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
         return;
     }
     sump_ols_init(&SUMP_CALLBACKS);
-    shell_printf("I2C: OK entering SUMP mode sda=GP%u scl=GP%u\n", sda, scl);
-    shell_print("I2C: point PulseView/sigrok-cli (driver 'ols') at this port NOW —\n");
-    shell_print("I2C: DTR dropping before that re-arms text mode and loses this session\n");
+    shell_print("LA: OK entering SUMP mode ch=GP0..GP7\n");
+    shell_print("LA: point PulseView/sigrok-cli (driver 'ols') at this port NOW —\n");
+    shell_print("LA: DTR dropping before that re-arms text mode and loses this session\n");
     // Set mode AFTER the prints, same ordering reason as buspirate/serprog.
-    s_shell_mode = SHELL_MODE_SUMP;
-}
-
-// -----------------------------------------------------------------------------
-// UART passive logic analyzer — `uart la <rx> <tx> <us> <n>` and
-// `uart la sump enter <rx> <tx>`.
-//
-// Reuses i2c_la.c (PIO+DMA ring) and sump_ols.c verbatim — both
-// functions just pass GP0/GP1 (or whatever the operator chose) through
-// the existing i2c_la_init/i2c_la_start/i2c_la_stop API. The SUMP
-// callbacks and grace-period disconnect logic defined above already
-// apply to any SHELL_MODE_SUMP session, so no main-loop changes are
-// needed for the SUMP path.
-// -----------------------------------------------------------------------------
-
-static void cmd_uart_la(int argc, char** argv) {
-    // argv: uart la <rx> <tx> <us> <n> [bin]
-    if (argc < 6) {
-        shell_print("UART: ERR usage: uart la <rx> <tx> <us> <n> [bin]\n");
-        return;
-    }
-    if (shell_bus_busy("UART"))
-        return;
-    uint8_t rx  = (uint8_t)strtoul(argv[2], NULL, 0);
-    uint8_t tx  = (uint8_t)strtoul(argv[3], NULL, 0);
-    uint32_t us = (uint32_t)strtoul(argv[4], NULL, 0);
-    uint32_t n  = (uint32_t)strtoul(argv[5], NULL, 0);
-    bool binary = (argc >= 7 && !strcmp(argv[6], "bin"));
-    if (n == 0u) {
-        shell_print("UART: ERR n must be > 0\n");
-        return;
-    }
-    if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
-        shell_print("UART: ERR bus_busy (held by another service)\n");
-        return;
-    }
-    if (!i2c_la_init(rx, tx)) {
-        shell_print("UART: ERR init_failed (pin range or duplicate?)\n");
-        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
-        return;
-    }
-    if (!i2c_la_start(us)) {
-        shell_print("UART: ERR start_failed\n");
-        i2c_la_deinit();
-        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
-        return;
-    }
-
-    shell_printf("UART: LA OK rx=GP%u tx=GP%u stream n=%lu interval_us=%lu\n", rx, tx,
-                 (unsigned long)n, (unsigned long)us);
-
-    la_stream_and_finish(n, binary);
-}
-
-static void cmd_uart_la_sump_enter(int argc, char** argv) {
-    // argv: uart la sump enter <rx> <tx>
-    if (argc < 6 || strcmp(argv[3], "enter") != 0) {
-        shell_print("UART: ERR usage: uart la sump enter <rx> <tx>\n");
-        return;
-    }
-    if (shell_bus_busy("UART"))
-        return;
-    uint8_t rx = (uint8_t)strtoul(argv[4], NULL, 0);
-    uint8_t tx = (uint8_t)strtoul(argv[5], NULL, 0);
-    if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
-        shell_print("UART: ERR bus_busy (held by another service)\n");
-        return;
-    }
-    if (!i2c_la_init(rx, tx)) {
-        shell_print("UART: ERR init_failed (pin range or duplicate?)\n");
-        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
-        return;
-    }
-    sump_ols_init(&SUMP_CALLBACKS);
-    shell_printf("UART: OK entering SUMP mode rx=GP%u tx=GP%u\n", rx, tx);
-    shell_print("UART: point PulseView/sigrok-cli (driver 'ols') at this port NOW —\n");
-    shell_print("UART: DTR dropping before that re-arms text mode and loses this session\n");
-    // Set mode AFTER the prints so the diag-gate doesn't swallow them.
     s_shell_mode = SHELL_MODE_SUMP;
 }
 
@@ -1432,13 +1346,6 @@ static void process_uart_subcmd(int argc, char** argv) {
         }
         uart_passthrough_set_stop_bits((uint8_t)strtoul(argv[2], NULL, 0));
         shell_print("UART: OK stopbits updated\n");
-        return;
-    }
-    if (!strcmp(sub, "la")) {
-        if (argc >= 4 && !strcmp(argv[2], "sump"))
-            cmd_uart_la_sump_enter(argc, argv);
-        else
-            cmd_uart_la(argc, argv);
         return;
     }
     shell_printf("UART: ERR unknown_subcmd: %s (try `?`)\n", sub);
@@ -1829,6 +1736,15 @@ static void process_shell_line(char* line) {
     }
     if (!strcmp(argv[0], "i2c")) {
         process_i2c_subcmd(argc, argv);
+        return;
+    }
+    if (!strcmp(argv[0], "la")) {
+        // `la sump enter` (PulseView/SUMP) vs. `la <us> <n> [bin]` raw
+        // hexdump — argv[1] disambiguates ("sump" vs. a number).
+        if (argc >= 2 && !strcmp(argv[1], "sump"))
+            cmd_la_sump_enter(argc, argv);
+        else
+            cmd_la(argc, argv);
         return;
     }
     // F11 release: the JTAG sub-shell and the direct-SWD sub-shell are
