@@ -184,7 +184,7 @@ static void shell_help(void) {
     shell_print(
         "SHELL:   i2c probe <sda> <scl>                       rescan addrs on known pins\n");
     shell_print(
-        "SHELL:   i2c la <sda> <scl> <us> <n>                  capture SDA/SCL, hex dump\n");
+        "SHELL:   i2c la <sda> <scl> <us> <n> [bin]            capture SDA/SCL, hex/binary dump\n");
     shell_print("SHELL: --- Campaign (F9) ---\n");
     shell_print("SHELL:   campaign status                              show state + counters\n");
     shell_print("SHELL:   campaign stop                                halt running sweep\n");
@@ -207,7 +207,8 @@ static void shell_help(void) {
         "SHELL:   uart enter [<baud> <n|e|o> <1|2>]            CH0=TX/CH1=RX, default 115200 N1\n");
     shell_print("SHELL:   uart baud <n> | parity <n|e|o> | stopbits <1|2>   live reconfigure\n");
     shell_print("SHELL:   uart status | exit\n");
-    shell_print("SHELL:   uart la <rx> <tx> <us> <n>               raw GPIO capture, hex dump\n");
+    shell_print(
+        "SHELL:   uart la <rx> <tx> <us> <n> [bin]         raw GPIO capture, hex/binary dump\n");
     shell_print(
         "SHELL:   uart la sump enter <rx> <tx>             SUMP/OLS for PulseView/sigrok\n");
     shell_print("SHELL: NOTE: JTAG and direct-SWD verbs (jtag *, swd *, scan jtag) are\n");
@@ -743,9 +744,102 @@ static bool i2c_la_cdc_write_all(const char* data, size_t len) {
     return true;
 }
 
+// Drains i2c_la's ring to the scanner CDC for exactly `n` samples, then
+// stops/deinits the capture and releases the SWD bus owner token. Shared by
+// cmd_i2c_la/cmd_uart_la — identical loop, only the summary line printed
+// before this runs differs between the two callers.
+//
+// `binary`: false sends each sample as 2 hex chars (human-readable, safe
+// over a text shell, but ~2x the bytes-on-wire of the raw samples — at fast
+// sample rates this can exceed USB FS CDC throughput before the firmware's
+// own ring even laps, see I2C_LA_CAPTURE_BUFFER_BYTES). true sends the raw
+// sample bytes verbatim, halving the wire bytes so 1us/sample captures have
+// headroom to keep up. Either way the host already knows `n` from the
+// summary line it just received, so it reads exactly `n` bytes (binary) or
+// `n*2` hex chars (text) — no in-band framing needed for either format.
+static void la_stream_and_finish(uint32_t n, bool binary) {
+    const uint8_t* buf = i2c_la_buffer();
+    uint32_t cursor    = 0u; // samples already streamed
+    bool overflow      = false;
+    bool gave_up       = false;
+
+    // Drain the ring continuously until n samples have streamed. The PIO
+    // SM paces samples regardless of bus activity, so i2c_la_total()
+    // always advances and this loop always terminates at n.
+    if (binary) {
+        uint8_t chunk[64];
+        size_t pos = 0;
+        while (cursor < n && !gave_up) {
+            uint32_t written = i2c_la_total();
+            if (written > n)
+                written = n;
+            if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+                overflow = true;
+                cursor   = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+            }
+            while (cursor < written) {
+                chunk[pos++] = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
+                cursor++;
+                if (pos >= sizeof(chunk)) {
+                    if (!i2c_la_cdc_write_all((const char*)chunk, pos)) {
+                        gave_up = true;
+                        break;
+                    }
+                    pos = 0;
+                }
+            }
+            usb_composite_task();
+        }
+        if (pos > 0u && !gave_up)
+            i2c_la_cdc_write_all((const char*)chunk, pos);
+    } else {
+        char line[80];
+        size_t pos = 0;
+        while (cursor < n && !gave_up) {
+            uint32_t written = i2c_la_total();
+            if (written > n)
+                written = n; // don't stream past the requested count
+            // If the DMA lapped the cursor, those samples are gone — skip
+            // to the oldest still in the ring and flag it once.
+            if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+                overflow = true;
+                cursor   = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+            }
+            while (cursor < written) {
+                uint8_t b = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
+                pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", b);
+                cursor++;
+                if (pos >= sizeof(line) - 4) {
+                    line[pos++] = '\n';
+                    if (!i2c_la_cdc_write_all(line, pos)) {
+                        gave_up = true;
+                        break;
+                    }
+                    pos = 0;
+                }
+            }
+            // Keep USB serviced while waiting for the timer to pace more.
+            usb_composite_task();
+        }
+        if (pos > 0u && !gave_up) {
+            line[pos++] = '\n';
+            i2c_la_cdc_write_all(line, pos);
+        }
+    }
+
+    i2c_la_stop();
+    i2c_la_deinit();
+    swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+
+    if (gave_up)
+        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nTRUNC\n");
+    else if (overflow)
+        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nOVERFLOW\n");
+}
+
 static void cmd_i2c_la(int argc, char** argv) {
     if (argc < 6) {
-        shell_print("I2C: ERR usage: i2c la <sda> <scl> <us> <n>\n");
+        shell_print("I2C: ERR usage: i2c la <sda> <scl> <us> <n> [bin]\n");
         return;
     }
     if (shell_bus_busy("I2C"))
@@ -754,6 +848,7 @@ static void cmd_i2c_la(int argc, char** argv) {
     uint8_t scl = (uint8_t)strtoul(argv[3], NULL, 0);
     uint32_t us = (uint32_t)strtoul(argv[4], NULL, 0);
     uint32_t n  = (uint32_t)strtoul(argv[5], NULL, 0);
+    bool binary = (argc >= 7 && !strcmp(argv[6], "bin"));
     if (n == 0u) {
         shell_print("I2C: ERR n must be > 0\n");
         return;
@@ -777,55 +872,7 @@ static void cmd_i2c_la(int argc, char** argv) {
     shell_printf("I2C: LA OK sda=GP%u scl=GP%u stream n=%lu interval_us=%lu\n", sda, scl,
                  (unsigned long)n, (unsigned long)us);
 
-    const uint8_t* buf = i2c_la_buffer();
-    uint32_t cursor    = 0u; // samples already streamed
-    bool overflow      = false;
-    bool gave_up       = false;
-    char line[80];
-    size_t pos = 0;
-
-    // Drain the ring continuously until n samples have streamed. The PIO
-    // SM paces samples regardless of bus activity, so i2c_la_total()
-    // always advances and this loop always terminates at n.
-    while (cursor < n && !gave_up) {
-        uint32_t written = i2c_la_total();
-        if (written > n)
-            written = n; // don't stream past the requested count
-        // If the DMA lapped the cursor, those samples are gone — skip to
-        // the oldest still in the ring and flag it once.
-        if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
-            overflow = true;
-            cursor   = written - I2C_LA_CAPTURE_BUFFER_BYTES;
-        }
-        while (cursor < written) {
-            uint8_t b = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
-            pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", b);
-            cursor++;
-            if (pos >= sizeof(line) - 4) {
-                line[pos++] = '\n';
-                if (!i2c_la_cdc_write_all(line, pos)) {
-                    gave_up = true;
-                    break;
-                }
-                pos = 0;
-            }
-        }
-        // Keep USB serviced while waiting for the timer to pace more.
-        usb_composite_task();
-    }
-    if (pos > 0u && !gave_up) {
-        line[pos++] = '\n';
-        i2c_la_cdc_write_all(line, pos);
-    }
-
-    i2c_la_stop();
-    i2c_la_deinit();
-    swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
-
-    if (gave_up)
-        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nTRUNC\n");
-    else if (overflow)
-        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nOVERFLOW\n");
+    la_stream_and_finish(n, binary);
 }
 
 // Defined below (SUMP/OLS section) — forward-declared so this
@@ -1050,13 +1097,61 @@ static void process_serprog_subcmd(int argc, char** argv) {
 // enter command has to be resent.
 // -----------------------------------------------------------------------------
 
+// sump_ols.c's do_arm() calls write_byte once per sample. At a sustained
+// 50 kHz+ capture rate, flushing a single byte over USB per call (as this
+// used to do) can't keep up with the PIO/DMA producer — that congestion is
+// the steady state at realistic sample rates, not a rare glitch, so a
+// per-byte retry-then-give-up (formerly up to I2C_LA_WRITE_RETRY_MAX_MS =
+// 5s on *every* byte) could stall a capture for minutes to hours instead of
+// the few seconds PulseView expects, with the host seeing no data and
+// eventually giving up. Buffer into SUMP_WRITE_CHUNK_BYTES-sized chunks —
+// same size as la_stream_and_finish's binary chunk — and flush with
+// i2c_la_cdc_write_all(), which retries/gives-up once per chunk instead of
+// once per byte. do_arm() calls the yield callback right after streaming
+// the last sample of a capture (see its outer while loop), so flushing the
+// pending chunk from sump_yield_cb also guarantees the final partial chunk
+// goes out without needing a dedicated "end of capture" hook.
+//
+// write_byte is also the ONLY output path emit_metadata()/CMD_ID use — it's
+// shared by every SUMP reply, not just do_arm()'s sample stream. Those
+// replies are short (4 bytes for CMD_ID, well under a chunk for
+// CMD_METADATA) and happen outside do_arm(), so nothing ever calls
+// sump_yield_cb to flush them — batching those the same way as sample bytes
+// left them stuck in the buffer forever, which is why PulseView stopped
+// recognizing the device (it never got an ID reply). sump_ols_is_capturing()
+// is only true inside do_arm()'s streaming loop, so gate the batching on it
+// and send anything else (ID, metadata, ...) straight through.
+#define SUMP_WRITE_CHUNK_BYTES 64u
+
+static uint8_t s_sump_write_chunk[SUMP_WRITE_CHUNK_BYTES];
+static size_t s_sump_write_chunk_len = 0u;
+
+static void sump_flush_write_chunk(void) {
+    if (s_sump_write_chunk_len == 0u)
+        return;
+    i2c_la_cdc_write_all((const char*)s_sump_write_chunk, s_sump_write_chunk_len);
+    s_sump_write_chunk_len = 0u;
+}
+
 static void sump_write_byte_cb(uint8_t b, void* u) {
     (void)u;
-    usb_composite_cdc_write(USB_CDC_SCANNER, &b, 1);
+    if (!sump_ols_is_capturing()) {
+        // Not a sample stream (ID reply, metadata, ...) — these are short,
+        // infrequent, and have no other flush point, so send immediately.
+        i2c_la_cdc_write_all((const char*)&b, 1);
+        return;
+    }
+    s_sump_write_chunk[s_sump_write_chunk_len++] = b;
+    if (s_sump_write_chunk_len >= SUMP_WRITE_CHUNK_BYTES)
+        sump_flush_write_chunk();
 }
 
 static void sump_yield_cb(void* u) {
     (void)u;
+    // Flush before the rest of the cooperative-tasking pump below so
+    // partial chunks (including the final one at end-of-capture) go out
+    // promptly instead of sitting buffered until the next full chunk.
+    sump_flush_write_chunk();
     // Same cooperative-tasking shape as sp_yield_cb — keeps the rest
     // of the firmware alive during ARM's (potentially long) capture
     // stream.
@@ -1069,6 +1164,9 @@ static void sump_yield_cb(void* u) {
 
 static void sump_on_exit_cb(void* u) {
     (void)u;
+    // Safety net: do_arm() always yields after its last write_byte (see
+    // above), but flush here too in case that invariant ever changes.
+    sump_flush_write_chunk();
     i2c_la_stop();
     i2c_la_deinit();
     swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
@@ -1138,9 +1236,9 @@ static void process_i2c_la_sump_subcmd(int argc, char** argv) {
 // -----------------------------------------------------------------------------
 
 static void cmd_uart_la(int argc, char** argv) {
-    // argv: uart la <rx> <tx> <us> <n>
+    // argv: uart la <rx> <tx> <us> <n> [bin]
     if (argc < 6) {
-        shell_print("UART: ERR usage: uart la <rx> <tx> <us> <n>\n");
+        shell_print("UART: ERR usage: uart la <rx> <tx> <us> <n> [bin]\n");
         return;
     }
     if (shell_bus_busy("UART"))
@@ -1149,6 +1247,7 @@ static void cmd_uart_la(int argc, char** argv) {
     uint8_t tx  = (uint8_t)strtoul(argv[3], NULL, 0);
     uint32_t us = (uint32_t)strtoul(argv[4], NULL, 0);
     uint32_t n  = (uint32_t)strtoul(argv[5], NULL, 0);
+    bool binary = (argc >= 7 && !strcmp(argv[6], "bin"));
     if (n == 0u) {
         shell_print("UART: ERR n must be > 0\n");
         return;
@@ -1172,49 +1271,7 @@ static void cmd_uart_la(int argc, char** argv) {
     shell_printf("UART: LA OK rx=GP%u tx=GP%u stream n=%lu interval_us=%lu\n", rx, tx,
                  (unsigned long)n, (unsigned long)us);
 
-    const uint8_t* buf = i2c_la_buffer();
-    uint32_t cursor    = 0u;
-    bool overflow      = false;
-    bool gave_up       = false;
-    char line[80];
-    size_t pos = 0;
-
-    while (cursor < n && !gave_up) {
-        uint32_t written = i2c_la_total();
-        if (written > n)
-            written = n;
-        if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
-            overflow = true;
-            cursor   = written - I2C_LA_CAPTURE_BUFFER_BYTES;
-        }
-        while (cursor < written) {
-            uint8_t b = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
-            pos += (size_t)snprintf(&line[pos], sizeof(line) - pos, "%02X", b);
-            cursor++;
-            if (pos >= sizeof(line) - 4) {
-                line[pos++] = '\n';
-                if (!i2c_la_cdc_write_all(line, pos)) {
-                    gave_up = true;
-                    break;
-                }
-                pos = 0;
-            }
-        }
-        usb_composite_task();
-    }
-    if (pos > 0u && !gave_up) {
-        line[pos++] = '\n';
-        i2c_la_cdc_write_all(line, pos);
-    }
-
-    i2c_la_stop();
-    i2c_la_deinit();
-    swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
-
-    if (gave_up)
-        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nTRUNC\n");
-    else if (overflow)
-        usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nOVERFLOW\n");
+    la_stream_and_finish(n, binary);
 }
 
 static void cmd_uart_la_sump_enter(int argc, char** argv) {
