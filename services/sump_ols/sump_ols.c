@@ -22,6 +22,16 @@
 #define CMD_SET_DIVIDER       0x80u
 #define CMD_CAPTURE_SIZE      0x81u
 
+// Basic trigger, stage 0. Confirmed against sigrok's
+// openbench-logic-sniffer/protocol.h (CMD_SET_TRIGGER_MASK 0xC0,
+// CMD_SET_TRIGGER_VALUE 0xC1, CMD_SET_TRIGGER_CONFIG 0xC2) and
+// protocol.c's set_trigger(), which forms each stage's opcode as
+// `base + stage * 4` — so 0xC0/0xC1 are stage 0 (0xC4/0xC5 stage 1,
+// etc.). We act on mask+value; config (0xC2) and higher stages fall
+// through to the generic long-command swallow.
+#define CMD_SET_TRIGGER_MASK0  0xC0u
+#define CMD_SET_TRIGGER_VALUE0 0xC1u
+
 // SUMP long commands (>= 0x80) always carry exactly 4 trailing data
 // bytes, even ones we don't act on (SET_FLAGS, advanced-trigger
 // select/write, basic-trigger mask/value/config per stage). We must
@@ -45,7 +55,10 @@ typedef struct {
                           // command currently being read.
     uint32_t interval_us; // from the last CMD_SET_DIVIDER.
     uint32_t n_samples;   // from the last CMD_CAPTURE_SIZE.
-    bool capturing;       // true only while ARM's capture loop runs.
+    uint8_t trigger_mask; // stage-0 basic trigger; NUM_PROBES_LONG=8 so
+    uint8_t trigger_value; // one byte covers every exposed channel.
+                           // mask == 0 (memset default) = match anything.
+    bool capturing;       // true for the whole ARM wait+stream duration.
 } sump_t;
 
 static sump_t s_sump;
@@ -139,10 +152,44 @@ static void do_arm(void) {
     uint32_t cursor    = 0u;
     uint32_t streamed  = 0u;
 
-    while (streamed < n) {
+    // Wait-for-trigger: advance the cursor through live samples without
+    // emitting until one matches (level match, stage 0). mask == 0
+    // matches the very first sample, so "no trigger configured" (the
+    // memset default) degenerates to today's immediate start — the
+    // streaming loop below just resumes from cursor 0. See
+    // docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md.
+    for (;;) {
         uint32_t written = i2c_la_total();
-        if (written > n)
-            written = n;
+        if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
+            // DMA lapped the unconsumed pre-trigger region — skip to the
+            // oldest sample still in the ring, same best-effort drop the
+            // streaming loop does below.
+            cursor = written - I2C_LA_CAPTURE_BUFFER_BYTES;
+        }
+        bool matched = false;
+        while (cursor < written) {
+            uint8_t s = buf[cursor % I2C_LA_CAPTURE_BUFFER_BYTES];
+            if ((s & s_sump.trigger_mask) == (s_sump.trigger_value & s_sump.trigger_mask)) {
+                matched = true; // cursor now points at the triggering sample
+                break;
+            }
+            cursor++;
+        }
+        if (matched)
+            break;
+        if (s_sump.cb.yield)
+            s_sump.cb.yield(s_sump.cb.user); // keep CDC/USB alive while waiting
+    }
+
+    while (streamed < n) {
+        uint32_t written   = i2c_la_total();
+        uint32_t remaining = n - streamed;
+        // Cap the live write head to (cursor + remaining), not an
+        // absolute sample index: with a trigger the capture starts at
+        // the trigger cursor rather than sample 0, so the old `written >
+        // n` cap would stop short by exactly the pre-trigger offset.
+        if (written - cursor > remaining)
+            written = cursor + remaining;
         if (written - cursor > I2C_LA_CAPTURE_BUFFER_BYTES) {
             // DMA lapped the cursor — those samples are gone. Skip to
             // the oldest still in the ring; SUMP has no in-band
@@ -183,6 +230,14 @@ bool sump_ols_is_capturing(void) {
     return s_sump.capturing;
 }
 
+uint8_t sump_ols_trigger_mask(void) {
+    return s_sump.trigger_mask;
+}
+
+uint8_t sump_ols_trigger_value(void) {
+    return s_sump.trigger_value;
+}
+
 void sump_ols_feed_byte(uint8_t b) {
     switch (s_sump.state) {
         case SUMP_OLS_IDLE:
@@ -209,6 +264,14 @@ void sump_ols_feed_byte(uint8_t b) {
                 case CMD_CAPTURE_SIZE:
                     s_sump.arg_acc = 0u;
                     s_sump.state   = SUMP_OLS_CAPTURE_SIZE_B0;
+                    return;
+                case CMD_SET_TRIGGER_MASK0:
+                    s_sump.arg_acc = 0u;
+                    s_sump.state   = SUMP_OLS_TRIGGER_MASK0_B0;
+                    return;
+                case CMD_SET_TRIGGER_VALUE0:
+                    s_sump.arg_acc = 0u;
+                    s_sump.state   = SUMP_OLS_TRIGGER_VALUE0_B0;
                     return;
                 default:
                     if (b >= SUMP_LONGCMD_THRESHOLD) {
@@ -271,6 +334,46 @@ void sump_ols_feed_byte(uint8_t b) {
             s_sump.state               = SUMP_OLS_IDLE;
             return;
         }
+
+        // Stage-0 trigger mask/value: 4-byte little-endian argument
+        // (mirrors SET_DIVIDER), but only channels 0-7 are exposed, so
+        // just the low byte is retained — the upper 24 bits address
+        // probes 8-31 this firmware doesn't have.
+        case SUMP_OLS_TRIGGER_MASK0_B0:
+            s_sump.arg_acc = (uint32_t)b;
+            s_sump.state   = SUMP_OLS_TRIGGER_MASK0_B1;
+            return;
+        case SUMP_OLS_TRIGGER_MASK0_B1:
+            s_sump.arg_acc |= (uint32_t)b << 8;
+            s_sump.state = SUMP_OLS_TRIGGER_MASK0_B2;
+            return;
+        case SUMP_OLS_TRIGGER_MASK0_B2:
+            s_sump.arg_acc |= (uint32_t)b << 16;
+            s_sump.state = SUMP_OLS_TRIGGER_MASK0_B3;
+            return;
+        case SUMP_OLS_TRIGGER_MASK0_B3:
+            s_sump.arg_acc |= (uint32_t)b << 24;
+            s_sump.trigger_mask = (uint8_t)(s_sump.arg_acc & 0xFFu);
+            s_sump.state        = SUMP_OLS_IDLE;
+            return;
+
+        case SUMP_OLS_TRIGGER_VALUE0_B0:
+            s_sump.arg_acc = (uint32_t)b;
+            s_sump.state   = SUMP_OLS_TRIGGER_VALUE0_B1;
+            return;
+        case SUMP_OLS_TRIGGER_VALUE0_B1:
+            s_sump.arg_acc |= (uint32_t)b << 8;
+            s_sump.state = SUMP_OLS_TRIGGER_VALUE0_B2;
+            return;
+        case SUMP_OLS_TRIGGER_VALUE0_B2:
+            s_sump.arg_acc |= (uint32_t)b << 16;
+            s_sump.state = SUMP_OLS_TRIGGER_VALUE0_B3;
+            return;
+        case SUMP_OLS_TRIGGER_VALUE0_B3:
+            s_sump.arg_acc |= (uint32_t)b << 24;
+            s_sump.trigger_value = (uint8_t)(s_sump.arg_acc & 0xFFu);
+            s_sump.state         = SUMP_OLS_IDLE;
+            return;
 
         case SUMP_OLS_SWALLOW_LONG_ARG_1:
             s_sump.state = SUMP_OLS_SWALLOW_LONG_ARG_2;

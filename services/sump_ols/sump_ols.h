@@ -30,11 +30,17 @@
 // datasheet — getting any of these wrong fails PulseView's scan
 // silently (no error, just "device not found" or garbled samples).
 //
-// Scope: enough of SUMP to let PulseView scan the device and run an
-// untriggered capture — exactly the subset enumerated in
-// I2C_LA_DMA_TIMER_PLAN.md §6. Trigger stage configuration (0xC0..0xCE)
-// is accepted (bytes consumed so the byte stream stays in sync) but
-// ignored: every ARM captures immediately, post-trigger only.
+// Scope: enough of SUMP to let PulseView scan the device and run a
+// capture with an optional stage-0 level trigger — the subset
+// enumerated in I2C_LA_DMA_TIMER_PLAN.md §6 plus basic triggering (see
+// docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md). Stage-0 trigger
+// mask/value (CMD_SET_TRIGGER_MASK/VALUE, 0xC0/0xC1) are parsed and
+// used to delay the capture start until the first matching sample;
+// stage-0 config (0xC2) and every higher stage (0xC4..0xCE) are still
+// accepted-and-ignored (bytes consumed so the stream stays in sync).
+// With no trigger configured PulseView sends no SET_TRIGGER_* at all,
+// so trigger_mask stays 0 (match-anything) and ARM starts immediately,
+// exactly as before.
 
 typedef struct {
     void (*write_byte)(uint8_t b, void* user);
@@ -65,8 +71,20 @@ typedef enum {
     SUMP_OLS_CAPTURE_SIZE_B3    = 8,
     SUMP_OLS_SWALLOW_LONG_ARG_1 = 9,  // generic 4-byte-argument sink for
     SUMP_OLS_SWALLOW_LONG_ARG_2 = 10, // long commands we accept but
-    SUMP_OLS_SWALLOW_LONG_ARG_3 = 11, // ignore (SET_FLAGS, trigger
-    SUMP_OLS_SWALLOW_LONG_ARG_4 = 12, // mask/value/config, ...).
+    SUMP_OLS_SWALLOW_LONG_ARG_3 = 11, // ignore (SET_FLAGS, stage-0
+    SUMP_OLS_SWALLOW_LONG_ARG_4 = 12, // trigger config, higher stages).
+
+    // Stage-0 basic trigger mask/value (CMD_SET_TRIGGER_MASK 0xC0 /
+    // CMD_SET_TRIGGER_VALUE 0xC1), 4-byte little-endian argument like
+    // SET_DIVIDER — only the low byte is kept (channels 0-7).
+    SUMP_OLS_TRIGGER_MASK0_B0  = 13,
+    SUMP_OLS_TRIGGER_MASK0_B1  = 14,
+    SUMP_OLS_TRIGGER_MASK0_B2  = 15,
+    SUMP_OLS_TRIGGER_MASK0_B3  = 16,
+    SUMP_OLS_TRIGGER_VALUE0_B0 = 17,
+    SUMP_OLS_TRIGGER_VALUE0_B1 = 18,
+    SUMP_OLS_TRIGGER_VALUE0_B2 = 19,
+    SUMP_OLS_TRIGGER_VALUE0_B3 = 20,
 } sump_ols_state_t;
 
 sump_ols_state_t sump_ols_get_state(void);
@@ -77,6 +95,13 @@ sump_ols_state_t sump_ols_get_state(void);
 // completion synchronously inside the ARM call, same as cmd_i2c_la.
 // Exposed for tests only.
 bool sump_ols_is_capturing(void);
+
+// Stage-0 trigger mask/value last parsed from CMD_SET_TRIGGER_MASK/VALUE
+// (low byte only — channels 0-7). mask == 0 means "match anything", the
+// zero-initialized default that makes ARM start immediately. Exposed for
+// tests only.
+uint8_t sump_ols_trigger_mask(void);
+uint8_t sump_ols_trigger_value(void);
 
 // ID reply sent for CMD_ID (0x02) — the literal 4 bytes the sigrok
 // `ols` driver's scan() matches with strncmp(buf, "1ALS", 4) (it also
