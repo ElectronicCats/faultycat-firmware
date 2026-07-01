@@ -36,15 +36,24 @@
 // that i2c_la_total() reflects the simulated DMA progress; on-wire
 // reconstruction is a hardware test.
 
-// Ring buffer size — same order of magnitude as EMFI_CAPTURE_BUFFER_BYTES
-// (services/glitch_engine/emfi/emfi_capture.h). One byte per sample; with
-// a fixed sample interval the timestamp of each sample is implicit
-// (index * sample_interval_us), so no separate timestamp storage is
-// needed. In continuous mode this is the sliding-window size, not the
-// total capture length — the DMA wraps it and the caller must drain
-// faster than I2C_LA_CAPTURE_BUFFER_BYTES samples accumulate or it lags.
-// MUST stay a power of two (ring-mode wrap masks the low bits).
-#define I2C_LA_CAPTURE_BUFFER_BYTES 8192u
+// Ring buffer size. One byte per sample; with a fixed sample interval the
+// timestamp of each sample is implicit (index * sample_interval_us), so no
+// separate timestamp storage is needed. In continuous mode this is the
+// sliding-window size, not the total capture length — the DMA wraps it and
+// the caller must drain faster than I2C_LA_CAPTURE_BUFFER_BYTES samples
+// accumulate or it lags. 32KB (up from 8KB) quadruples the drain-time
+// budget at the fastest supported sample rate (1us/sample: 32768us = 33ms
+// before the DMA laps the cursor, vs. 8ms at the old size) — the real
+// overflow risk at high sample rates is USB CDC drain throughput, not
+// total capture length (the streaming loop in cmd_i2c_la/cmd_uart_la/
+// sump_ols.c::do_arm handles n_samples well beyond this size already).
+// 32768 (2^15) is also the hardware ceiling: the RP2040 DMA ring-wrap
+// field is 4 bits wide (0-15), so this is the largest ring the silicon
+// can express — see I2C_LA_CAPTURE_RING_BITS in i2c_la.c. RP2040 has
+// 256KB SRAM total; this and emfi_capture's 8KB ring are the only large
+// static buffers, leaving plenty of headroom. MUST stay a power of two
+// (ring-mode wrap masks the low bits).
+#define I2C_LA_CAPTURE_BUFFER_BYTES 32768u
 
 // Per-sample byte: a raw snapshot of GPIO_IN[7:0] (GP0..GP7) copied
 // verbatim by DMA. The SDA level of a sample is bit (1u << sda) and SCL is

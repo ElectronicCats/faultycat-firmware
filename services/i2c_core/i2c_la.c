@@ -57,9 +57,17 @@ static const uint16_t s_pio_prog[I2C_LA_PIO_PROG_LEN] = {
 #define I2C_LA_PIO_WRAP_END          1u
 #define I2C_LA_PIO_CYCLES_PER_SAMPLE 2u
 
-// Ring-mode wrap width: 2^13 = 8192 = I2C_LA_CAPTURE_BUFFER_BYTES. Must
-// track the buffer size exactly (the build asserts it below).
-#define I2C_LA_CAPTURE_RING_BITS 13u
+// Ring-mode wrap width: 2^15 = 32768 = I2C_LA_CAPTURE_BUFFER_BYTES. Must
+// track the buffer size exactly (the build asserts it below). 15 is the
+// hardware ceiling: the RP2040 DMA CTRL_TRIG.RING_SIZE field is only 4
+// bits wide (values 0-15, i.e. up to a 32768-byte ring — see pico-sdk's
+// channel_config_set_ring() doc comment). 16 silently overflows that
+// field: size_bits << RING_SIZE_LSB lands exactly on the adjacent
+// RING_SEL bit, so RING_SIZE reads back as 0, which the SDK defines as
+// "no wrapping" — the DMA then free-runs linearly past the end of
+// s_buffer[] into adjacent RAM instead of wrapping, which is what
+// wedges the TinyUSB stack (see the comment on s_buffer below).
+#define I2C_LA_CAPTURE_RING_BITS 15u
 
 // transfer_count for a never-ending transfer: the DMA decrements from this
 // on every sample, so (0xFFFFFFFF - remaining) is the running total.
