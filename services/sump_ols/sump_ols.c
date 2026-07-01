@@ -101,7 +101,7 @@ static void emit_metadata(void) {
     emit_be32(8u);
 
     emit(METADATA_TOKEN_SAMPLE_MEMORY_BYTES);
-    emit_be32(I2C_LA_CAPTURE_BUFFER_BYTES);
+    emit_be32(SUMP_OLS_MAX_SAMPLES);
 
     // DMA-timer pacing is limited in practice by sample_interval_us
     // granularity (1us minimum, see i2c_la.c's divisor_for) — report

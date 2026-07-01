@@ -88,6 +88,15 @@ bool sump_ols_is_capturing(void);
 // NUL). Exposed for tests/docs.
 #define SUMP_OLS_DEVICE_NAME "FaultyCat I2C LA"
 
+// Maximum sample count the SUMP CMD_CAPTURE_SIZE encoding can express:
+// readcount is a uint16 (max 65536), stored in units of 4 samples →
+// 65536 * 4 = 262144.  Reported in CMD_METADATA SAMPLE_MEMORY_BYTES so
+// PulseView lets the user select up to this value.  The ring buffer
+// (I2C_LA_CAPTURE_BUFFER_BYTES) is just the DMA sliding window; the
+// streaming loop in do_arm() handles n_samples well beyond that size as
+// long as USB can drain it fast enough.
+#define SUMP_OLS_MAX_SAMPLES 262144u
+
 // Fallback sample interval (microseconds) used by CMD_ARM if the host
 // never sent CMD_SET_DIVIDER first — shouldn't happen in practice
 // (sigrok's ols_prepare_acquisition always sends it), but keeps ARM
