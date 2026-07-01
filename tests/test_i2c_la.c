@@ -168,8 +168,8 @@ static void test_start_configures_ring_mode_pio_dma(void) {
     TEST_ASSERT_EQUAL_UINT(HAL_DMA_SIZE_8, s->cfg.size);
     TEST_ASSERT_FALSE(s->cfg.read_increment);
     TEST_ASSERT_TRUE(s->cfg.write_increment);
-    // Ring mode on the write side, wrapping the 8192-byte buffer.
-    TEST_ASSERT_EQUAL_UINT32(13u, s->cfg.ring_bits);
+    // Ring mode on the write side, wrapping the I2C_LA_CAPTURE_BUFFER_BYTES buffer.
+    TEST_ASSERT_EQUAL_UINT32(15u, s->cfg.ring_bits);
     TEST_ASSERT_TRUE(s->cfg.ring_on_write);
     TEST_ASSERT_EQUAL_UINT((hal_dma_dreq_t)hal_pio_sm_rx_dreq(pio, I2C_LA_PIO_SM), s->cfg.dreq);
     TEST_ASSERT_EQUAL_PTR(hal_pio_sm_rxfifo_register(pio, I2C_LA_PIO_SM), s->src);

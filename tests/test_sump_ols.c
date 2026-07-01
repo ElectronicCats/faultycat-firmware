@@ -115,7 +115,7 @@ static void test_id_replies_1als(void) {
 // matching i2c_la's raw GPIO_IN[7:0] byte format).
 // -----------------------------------------------------------------------------
 
-static void test_metadata_reports_8_probes_and_buffer_size(void) {
+static void test_metadata_reports_8_probes_and_max_samples(void) {
     uint8_t cmd_meta = 0x04u;
     feed(&cmd_meta, 1u);
 
@@ -130,10 +130,10 @@ static void test_metadata_reports_8_probes_and_buffer_size(void) {
     expect[pos++] = 0x00u;
     expect[pos++] = 0x08u;
     expect[pos++] = 0x21u; // SAMPLE_MEMORY_BYTES
-    expect[pos++] = (uint8_t)((I2C_LA_CAPTURE_BUFFER_BYTES >> 24) & 0xFFu);
-    expect[pos++] = (uint8_t)((I2C_LA_CAPTURE_BUFFER_BYTES >> 16) & 0xFFu);
-    expect[pos++] = (uint8_t)((I2C_LA_CAPTURE_BUFFER_BYTES >> 8) & 0xFFu);
-    expect[pos++] = (uint8_t)(I2C_LA_CAPTURE_BUFFER_BYTES & 0xFFu);
+    expect[pos++] = (uint8_t)((SUMP_OLS_MAX_SAMPLES >> 24) & 0xFFu);
+    expect[pos++] = (uint8_t)((SUMP_OLS_MAX_SAMPLES >> 16) & 0xFFu);
+    expect[pos++] = (uint8_t)((SUMP_OLS_MAX_SAMPLES >> 8) & 0xFFu);
+    expect[pos++] = (uint8_t)(SUMP_OLS_MAX_SAMPLES & 0xFFu);
     expect[pos++] = 0x23u; // MAX_SAMPLE_RATE_HZ (1 MHz)
     expect[pos++] = 0x00u;
     expect[pos++] = 0x0Fu;
@@ -263,7 +263,7 @@ int main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_id_replies_1als);
-    RUN_TEST(test_metadata_reports_8_probes_and_buffer_size);
+    RUN_TEST(test_metadata_reports_8_probes_and_max_samples);
 
     RUN_TEST(test_set_divider_feeds_interval_into_next_arm);
     RUN_TEST(test_arm_without_set_divider_uses_default_interval);
