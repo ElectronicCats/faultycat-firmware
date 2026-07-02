@@ -47,6 +47,19 @@ and pick the decoder.
   `docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md`) — the trigger matches raw
   channel bytes, so it too is protocol-agnostic.
 
+  SUMP captures are **capture-then-dump and lossless**: ARM lets the DMA
+  fill the ring with the requested samples, stops it, then streams the
+  frozen buffer — USB throughput can no longer cause silent mid-capture
+  sample drops (ring laps), which used to corrupt protocol decode at
+  sample rates above what USB FS CDC drains. The dump is sent **newest
+  sample first** (the SUMP reverse-order convention; sigrok's ols driver
+  un-reverses it — verified on hardware, oldest-first shows a
+  time-mirrored capture). The tradeoff is a bounded
+  capture: at most `SUMP_OLS_MAX_SAMPLES` (16384, half the ring —
+  advertised to PulseView as the sample memory) per capture; for longer
+  windows, lower the sample rate. The `la <us> <n> [bin]` shell command
+  keeps the unbounded best-effort streaming mode for raw captures.
+
 ## Shell commands (CDC2 text shell)
 
 | Command | Purpose |
