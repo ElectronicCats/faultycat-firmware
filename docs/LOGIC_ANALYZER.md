@@ -45,7 +45,14 @@ and pick the decoder.
   `NUM_PROBES_LONG = LA_CHANNEL_COUNT` and device name `"FaultyCat LA"`.
   Optional stage-0 level trigger (see
   `docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md`) — the trigger matches raw
-  channel bytes, so it too is protocol-agnostic.
+  channel bytes, so it too is protocol-agnostic. PulseView's
+  **pre-trigger capture ratio** is honored (SUMP `delaycount`): that
+  fraction of the window is served from before the trigger. Serial
+  decoders need some of it — a window starting dead on the trigger
+  sample gives the UART decoder no idle line/falling edge to sync on —
+  so triggered captures always include at least
+  `SUMP_OLS_PRETRIGGER_MIN` (32) samples of history even at the default
+  0% ratio; set ~10% when you want more context before the trigger.
 
   SUMP captures are **capture-then-dump and lossless**: ARM lets the DMA
   fill the ring with the requested samples, stops it, then streams the
