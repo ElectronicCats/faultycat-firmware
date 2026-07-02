@@ -471,7 +471,8 @@ static void test_triggered_arm_floors_pretrigger_history(void) {
     // Trigger sample (index 40) sits SUMP_OLS_PRETRIGGER_MIN into the
     // window: wire position 1023 - 32.
     TEST_ASSERT_EQUAL_UINT8(0x00u, s_writes[1023u - SUMP_OLS_PRETRIGGER_MIN]);
-    TEST_ASSERT_EQUAL_UINT8(0x01u, s_writes[1024u - SUMP_OLS_PRETRIGGER_MIN]); // idle just before it
+    TEST_ASSERT_EQUAL_UINT8(0x01u,
+                            s_writes[1024u - SUMP_OLS_PRETRIGGER_MIN]); // idle just before it
 }
 
 // A real trigger wait can span many samples; do_arm must keep calling
