@@ -409,6 +409,71 @@ static void test_arm_waits_for_trigger_before_streaming(void) {
     TEST_ASSERT_EQUAL_MEMORY(expect, s_writes, 4u);
 }
 
+// CMD_CAPTURE_SIZE's high word (delaycount, units of 4 samples) sets how
+// much of the window runs AFTER the trigger; the remainder is served from
+// pre-trigger ring history (PulseView's "pre-trigger capture ratio").
+// readcount=2 (n=8) with delaycount=1 (post=4) and the trigger at index 4
+// must dump window [0..7]: four idle pre-trigger samples, the triggering
+// sample, and three more — reversed on the wire like every dump.
+static void test_capture_size_delaycount_includes_pretrigger_history(void) {
+    sump_ols_init(&REVEAL_CB);
+
+    uint8_t samples[] = {0x01u, 0x01u, 0x01u, 0x01u, 0x00u, 0xAAu, 0xBBu, 0xCCu, 0xDDu};
+    preload_ring(0u, samples, sizeof(samples));
+    s_reveal_total = 9u;
+
+    uint8_t set_mask[]  = {0xC0u, 0x01u, 0x00u, 0x00u, 0x00u}; // watch bit 0
+    uint8_t set_value[] = {0xC1u, 0x00u, 0x00u, 0x00u, 0x00u}; // fire when it's 0
+    feed(set_mask, sizeof(set_mask));
+    feed(set_value, sizeof(set_value));
+
+    // readcount-1 = 1 (=> n=8), delaycount-1 = 0 (=> post=4, pre=4).
+    uint8_t capture_size[] = {0x81u, 0x01u, 0x00u, 0x00u, 0x00u};
+    feed(capture_size, sizeof(capture_size));
+    uint8_t arm = 0x01u;
+    feed(&arm, 1u);
+
+    // Window [0..7] = {01 01 01 01 00 AA BB CC}, newest first on the wire.
+    uint8_t expect[] = {0xCCu, 0xBBu, 0xAAu, 0x00u, 0x01u, 0x01u, 0x01u, 0x01u};
+    TEST_ASSERT_EQUAL_UINT32(8u, s_writes_len);
+    TEST_ASSERT_EQUAL_MEMORY(expect, s_writes, 8u);
+}
+
+// Even with delaycount == readcount (PulseView's default 0% capture
+// ratio), a capture with a real trigger must include the
+// SUMP_OLS_PRETRIGGER_MIN floor of history so serial decoders can sync
+// on the idle line before the trigger edge. n=1024, trigger at index 40:
+// the window must start at 40 - 32 = 8.
+static void test_triggered_arm_floors_pretrigger_history(void) {
+    sump_ols_init(&REVEAL_CB);
+
+    uint8_t samples[48];
+    memset(samples, 0x01u, sizeof(samples)); // idle high on bit 0
+    samples[40] = 0x00u;                     // trigger sample
+    preload_ring(0u, samples, sizeof(samples));
+    s_reveal_total = 2048u;
+
+    uint8_t set_mask[]  = {0xC0u, 0x01u, 0x00u, 0x00u, 0x00u}; // watch bit 0
+    uint8_t set_value[] = {0xC1u, 0x00u, 0x00u, 0x00u, 0x00u}; // fire when it's 0
+    feed(set_mask, sizeof(set_mask));
+    feed(set_value, sizeof(set_value));
+
+    // readcount-1 = 255 (=> n=1024), delaycount-1 = 255 (=> post=1024,
+    // pre=0 as requested — the floor must override it).
+    uint8_t capture_size[] = {0x81u, 0xFFu, 0x00u, 0xFFu, 0x00u};
+    feed(capture_size, sizeof(capture_size));
+    uint8_t arm = 0x01u;
+    feed(&arm, 1u);
+
+    TEST_ASSERT_EQUAL_UINT32(1024u, s_writes_len);
+    // Reversed wire order: the window's oldest sample (index 8) is last.
+    TEST_ASSERT_EQUAL_UINT8(0x01u, s_writes[1023u]);
+    // Trigger sample (index 40) sits SUMP_OLS_PRETRIGGER_MIN into the
+    // window: wire position 1023 - 32.
+    TEST_ASSERT_EQUAL_UINT8(0x00u, s_writes[1023u - SUMP_OLS_PRETRIGGER_MIN]);
+    TEST_ASSERT_EQUAL_UINT8(0x01u, s_writes[1024u - SUMP_OLS_PRETRIGGER_MIN]); // idle just before it
+}
+
 // A real trigger wait can span many samples; do_arm must keep calling
 // yield() (which pumps tud_task/USB) while blocked, not busy-loop. Reveal
 // only idle samples for the first polls, then the match, and confirm both
@@ -461,6 +526,8 @@ int main(void) {
     RUN_TEST(test_no_trigger_configured_starts_immediately);
     RUN_TEST(test_trigger_mask_value_parsed_from_wire);
     RUN_TEST(test_arm_waits_for_trigger_before_streaming);
+    RUN_TEST(test_capture_size_delaycount_includes_pretrigger_history);
+    RUN_TEST(test_triggered_arm_floors_pretrigger_history);
     RUN_TEST(test_arm_polls_yield_while_waiting_for_trigger);
 
     return UNITY_END();
