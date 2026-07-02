@@ -265,6 +265,23 @@ static void test_arm_without_capture_size_uses_default_n_samples(void) {
     TEST_ASSERT_EQUAL_UINT32(SUMP_OLS_DEFAULT_N_SAMPLES, s_writes_len);
 }
 
+// A host that ignores the advertised sample memory (metadata token 0x21)
+// and asks for more than SUMP_OLS_MAX_SAMPLES must be clamped to it —
+// capture-then-dump can only guarantee losslessness for what fits in the
+// ring with headroom, same as real OLS hardware capping at its physical
+// memory.
+static void test_arm_clamps_oversized_capture_to_max_samples(void) {
+    // readcount-1 = 65535 => readcount = 65536 => n = 262144, the largest
+    // count the CMD_CAPTURE_SIZE encoding can express.
+    uint8_t capture_size[] = {0x81u, 0xFFu, 0xFFu, 0x00u, 0x00u};
+    feed(capture_size, sizeof(capture_size));
+
+    uint8_t arm = 0x01u;
+    feed(&arm, 1u);
+
+    TEST_ASSERT_EQUAL_UINT32(SUMP_OLS_MAX_SAMPLES, s_writes_len);
+}
+
 static void test_arm_stops_the_dma_after_streaming(void) {
     int ch      = claimed_dma_channel();
     uint8_t arm = 0x01u;
@@ -322,8 +339,10 @@ static void test_reset_when_idle_is_safe(void) {
 // -----------------------------------------------------------------------------
 
 // Regression guard for the backward-compat claim: no SET_TRIGGER_* sent, so
-// mask/value keep their zero default and the capture streams from sample 0
-// exactly like before triggering existed.
+// mask/value keep their zero default and the capture starts from sample 0
+// exactly like before triggering existed. The wire order is reverse
+// chronological (newest sample first — the SUMP convention sigrok's ols
+// driver un-reverses), so sample 0 arrives LAST.
 static void test_no_trigger_configured_starts_immediately(void) {
     sump_ols_init(&REVEAL_CB);
 
@@ -341,7 +360,8 @@ static void test_no_trigger_configured_starts_immediately(void) {
     feed(&arm, 1u);
 
     TEST_ASSERT_EQUAL_UINT32(20u, s_writes_len);
-    TEST_ASSERT_EQUAL_MEMORY(pattern, s_writes, 20u); // started at sample 0
+    for (uint8_t i = 0; i < 20u; i++) // reversed: newest (sample 19) first
+        TEST_ASSERT_EQUAL_UINT8(pattern[19u - i], s_writes[i]);
 }
 
 // Mask/value are 4-byte little-endian args (like SET_DIVIDER); only the low
@@ -363,8 +383,9 @@ static void test_trigger_mask_value_parsed_from_wire(void) {
 }
 
 // Idle-high RX line (bit 0 = 1) then a start bit (bit 0 = 0): a mask/value
-// selecting "bit 0 low" must skip the idle samples and begin the stream at
-// the triggering sample, not sample 0.
+// selecting "bit 0 low" must skip the idle samples and begin the capture at
+// the triggering sample, not sample 0. On the wire the window arrives
+// reversed (newest first), so the triggering sample is the LAST byte.
 static void test_arm_waits_for_trigger_before_streaming(void) {
     sump_ols_init(&REVEAL_CB);
 
@@ -382,7 +403,8 @@ static void test_arm_waits_for_trigger_before_streaming(void) {
     uint8_t arm = 0x01u;
     feed(&arm, 1u);
 
-    uint8_t expect[] = {0x00u, 0xAAu, 0xBBu, 0xCCu}; // from index 2, not 0
+    // Window [2..5] = {0x00, 0xAA, 0xBB, 0xCC}, reversed on the wire.
+    uint8_t expect[] = {0xCCu, 0xBBu, 0xAAu, 0x00u};
     TEST_ASSERT_EQUAL_UINT32(4u, s_writes_len);
     TEST_ASSERT_EQUAL_MEMORY(expect, s_writes, 4u);
 }
@@ -409,7 +431,7 @@ static void test_arm_polls_yield_while_waiting_for_trigger(void) {
 
     TEST_ASSERT_TRUE(s_yield_calls >= 3);        // polled while blocked waiting
     TEST_ASSERT_EQUAL_UINT32(4u, s_writes_len);  // then unblocked and finished
-    TEST_ASSERT_EQUAL_UINT8(0x00u, s_writes[0]); // started at the start bit
+    TEST_ASSERT_EQUAL_UINT8(0x00u, s_writes[3]); // triggering sample last (reversed wire order)
     TEST_ASSERT_FALSE(sump_ols_is_capturing());
 }
 
@@ -428,6 +450,7 @@ int main(void) {
 
     RUN_TEST(test_capture_size_sets_arm_sample_count);
     RUN_TEST(test_arm_without_capture_size_uses_default_n_samples);
+    RUN_TEST(test_arm_clamps_oversized_capture_to_max_samples);
     RUN_TEST(test_arm_stops_the_dma_after_streaming);
 
     RUN_TEST(test_unknown_long_command_swallows_4_bytes_then_resyncs);
