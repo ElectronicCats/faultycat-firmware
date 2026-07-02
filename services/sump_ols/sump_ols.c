@@ -131,11 +131,22 @@ static void emit_metadata(void) {
 }
 
 // -----------------------------------------------------------------------------
-// CMD_ARM_BASIC_TRIGGER — synchronous capture + raw stream, same
-// ring-drain shape as apps/faultycat_fw/main.c::cmd_la but binary
-// (no hex/ASCII framing) and via the yield callback instead of a
-// direct usb_composite_task() call.
+// CMD_ARM_BASIC_TRIGGER — synchronous capture-then-dump. Three phases:
+// wait for the stage-0 trigger, let the DMA fill the ring with the n
+// requested samples, then STOP the DMA and stream the frozen buffer.
+// Dumping with the DMA stopped removes all time pressure from the USB
+// path, so the capture is lossless by construction — the old
+// stream-while-capturing loop silently skipped a ring-lap's worth of
+// samples whenever USB fell behind the DMA (the steady state at
+// realistic sample rates), which is what broke protocol decode in
+// PulseView. SUMP_OLS_MAX_SAMPLES <= half the ring (asserted below)
+// guarantees the fill phase can't overwrite the samples it is
+// accumulating; see the constant's comment in sump_ols.h.
 // -----------------------------------------------------------------------------
+
+_Static_assert(SUMP_OLS_MAX_SAMPLES <= LA_CAPTURE_BUFFER_BYTES / 2u,
+               "lossless capture-then-dump needs ring headroom: the DMA keeps "
+               "writing between the fill-complete poll and la_stop()");
 
 static void do_arm(void) {
     if (!la_is_inited())
@@ -144,6 +155,13 @@ static void do_arm(void) {
     uint32_t interval_us =
         (s_sump.interval_us != 0u) ? s_sump.interval_us : SUMP_OLS_DEFAULT_INTERVAL_US;
     uint32_t n = (s_sump.n_samples != 0u) ? s_sump.n_samples : SUMP_OLS_DEFAULT_N_SAMPLES;
+    // CMD_CAPTURE_SIZE can encode up to 65536*4 samples, but metadata
+    // advertises SUMP_OLS_MAX_SAMPLES as the sample memory, so a
+    // compliant host (sigrok clamps limit_samples to it) never asks for
+    // more. Clamp anyway, like real OLS hardware whose dump is also
+    // capped by physical memory, rather than overrun the ring.
+    if (n > SUMP_OLS_MAX_SAMPLES)
+        n = SUMP_OLS_MAX_SAMPLES;
 
     if (!la_start(interval_us))
         return;
@@ -151,20 +169,18 @@ static void do_arm(void) {
     s_sump.capturing   = true;
     const uint8_t* buf = la_buffer();
     uint32_t cursor    = 0u;
-    uint32_t streamed  = 0u;
 
-    // Wait-for-trigger: advance the cursor through live samples without
-    // emitting until one matches (level match, stage 0). mask == 0
+    // Phase 1 — wait-for-trigger: advance the cursor through live samples
+    // without emitting until one matches (level match, stage 0). mask == 0
     // matches the very first sample, so "no trigger configured" (the
-    // memset default) degenerates to today's immediate start — the
-    // streaming loop below just resumes from cursor 0. See
+    // memset default) degenerates to an immediate start. See
     // docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md.
     for (;;) {
         uint32_t written = la_total();
         if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
             // DMA lapped the unconsumed pre-trigger region — skip to the
-            // oldest sample still in the ring, same best-effort drop the
-            // streaming loop does below.
+            // oldest sample still in the ring (pre-trigger samples are
+            // discarded anyway, so nothing of value is lost).
             cursor = written - LA_CAPTURE_BUFFER_BYTES;
         }
         bool matched = false;
@@ -182,33 +198,34 @@ static void do_arm(void) {
             s_sump.cb.yield(s_sump.cb.user); // keep CDC/USB alive while waiting
     }
 
-    while (streamed < n) {
-        uint32_t written   = la_total();
-        uint32_t remaining = n - streamed;
-        // Cap the live write head to (cursor + remaining), not an
-        // absolute sample index: with a trigger the capture starts at
-        // the trigger cursor rather than sample 0, so the old `written >
-        // n` cap would stop short by exactly the pre-trigger offset.
-        if (written - cursor > remaining)
-            written = cursor + remaining;
-        if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
-            // DMA lapped the cursor — those samples are gone. Skip to
-            // the oldest still in the ring; SUMP has no in-band
-            // overflow signal so this is silently best-effort, same
-            // tradeoff cmd_la's OVERFLOW text just makes visible.
-            cursor = written - LA_CAPTURE_BUFFER_BYTES;
-        }
-        while (cursor < written) {
-            emit(buf[cursor % LA_CAPTURE_BUFFER_BYTES]);
-            cursor++;
-            streamed++;
-            yield_if_due(streamed - 1u);
-        }
+    // Phase 2 — bounded acquisition: the DMA runs alone until the ring
+    // holds the n post-trigger samples (la_total() - cursor is the
+    // wrap-safe count of them), then freezes. The DMA overshoots past n
+    // between the last poll and la_stop(), but n <= half the ring, so
+    // the overshoot lands in the free half instead of overwriting
+    // [cursor, cursor+n).
+    while (la_total() - cursor < n) {
         if (s_sump.cb.yield)
             s_sump.cb.yield(s_sump.cb.user);
     }
-
     la_stop();
+
+    // Phase 3 — lossless dump of the frozen buffer, NEWEST sample first.
+    // SUMP devices transmit their sample memory in reverse chronological
+    // order (a quirk of the original FPGA implementation) and sigrok's
+    // ols driver un-reverses it for display — verified on hardware:
+    // sending oldest-first made PulseView render every capture
+    // time-mirrored (burst pinned to the window's end, UART bytes
+    // bit-flipped into garbage). No live write head to race against:
+    // USB can take as long as it needs. The trailing yield flushes
+    // main.c's final partial write chunk (its flush hook).
+    for (uint32_t streamed = 0u; streamed < n; streamed++) {
+        emit(buf[(cursor + (n - 1u - streamed)) % LA_CAPTURE_BUFFER_BYTES]);
+        yield_if_due(streamed);
+    }
+    if (s_sump.cb.yield)
+        s_sump.cb.yield(s_sump.cb.user);
+
     s_sump.capturing = false;
 }
 

@@ -33,7 +33,10 @@
 // Scope: enough of SUMP to let PulseView scan the device and run a
 // capture with an optional stage-0 level trigger — the subset
 // enumerated in I2C_LA_DMA_TIMER_PLAN.md §6 plus basic triggering (see
-// docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md). Stage-0 trigger
+// docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md). ARM's sample dump goes
+// out in reverse chronological order (newest first) — the SUMP
+// convention sigrok's ols driver un-reverses on receive; sending
+// oldest-first renders every capture time-mirrored in PulseView. Stage-0 trigger
 // mask/value (CMD_SET_TRIGGER_MASK/VALUE, 0xC0/0xC1) are parsed and
 // used to delay the capture start until the first matching sample;
 // stage-0 config (0xC2) and every higher stage (0xC4..0xCE) are still
@@ -113,14 +116,25 @@ uint8_t sump_ols_trigger_value(void);
 // NUL). Exposed for tests/docs.
 #define SUMP_OLS_DEVICE_NAME "FaultyCat LA"
 
-// Maximum sample count the SUMP CMD_CAPTURE_SIZE encoding can express:
-// readcount is a uint16 (max 65536), stored in units of 4 samples →
-// 65536 * 4 = 262144.  Reported in CMD_METADATA SAMPLE_MEMORY_BYTES so
-// PulseView lets the user select up to this value.  The ring buffer
-// (LA_CAPTURE_BUFFER_BYTES) is just the DMA sliding window; the
-// streaming loop in do_arm() handles n_samples well beyond that size as
-// long as USB can drain it fast enough.
-#define SUMP_OLS_MAX_SAMPLES 262144u
+// Maximum samples per capture, reported in CMD_METADATA
+// SAMPLE_MEMORY_BYTES so PulseView never requests more. Half the ring
+// (LA_CAPTURE_BUFFER_BYTES / 2 — asserted in sump_ols.c): do_arm()
+// captures losslessly by letting the DMA fill the ring until the n
+// post-trigger samples are in, then STOPPING it before streaming
+// (capture-then-dump), so n must fit in the ring with headroom for the
+// samples the DMA keeps writing between the "n reached" poll and
+// la_stop(). Half the ring leaves 16384 samples (16 ms at the fastest
+// 1 us/sample rate) of that slack — orders of magnitude above the
+// poll loop's yield latency.
+//
+// This deliberately trades away the old unbounded streaming mode: at
+// realistic sample rates USB FS CDC can't drain the ring as fast as
+// the DMA fills it, so streaming silently dropped ring-laps' worth of
+// samples mid-capture — exactly the gaps that broke protocol decode in
+// PulseView. Bounded-but-lossless wins for a protocol analyzer; the
+// `la <us> <n> bin` shell command still offers best-effort unbounded
+// streaming for raw captures.
+#define SUMP_OLS_MAX_SAMPLES 16384u
 
 // Fallback sample interval (microseconds) used by CMD_ARM if the host
 // never sent CMD_SET_DIVIDER first — shouldn't happen in practice

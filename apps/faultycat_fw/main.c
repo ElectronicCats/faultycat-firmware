@@ -1085,20 +1085,19 @@ static void process_serprog_subcmd(int argc, char** argv) {
 // enter command has to be resent.
 // -----------------------------------------------------------------------------
 
-// sump_ols.c's do_arm() calls write_byte once per sample. At a sustained
-// 50 kHz+ capture rate, flushing a single byte over USB per call (as this
-// used to do) can't keep up with the PIO/DMA producer — that congestion is
-// the steady state at realistic sample rates, not a rare glitch, so a
-// per-byte retry-then-give-up (formerly up to LA_WRITE_RETRY_MAX_MS =
-// 5s on *every* byte) could stall a capture for minutes to hours instead of
-// the few seconds PulseView expects, with the host seeing no data and
-// eventually giving up. Buffer into SUMP_WRITE_CHUNK_BYTES-sized chunks —
-// same size as la_stream_and_finish's binary chunk — and flush with
-// la_cdc_write_all(), which retries/gives-up once per chunk instead of
-// once per byte. do_arm() calls the yield callback right after streaming
-// the last sample of a capture (see its outer while loop), so flushing the
-// pending chunk from sump_yield_cb also guarantees the final partial chunk
-// goes out without needing a dedicated "end of capture" hook.
+// sump_ols.c's do_arm() calls write_byte once per sample. Since the
+// capture-then-dump rework the dump streams from a frozen buffer (the DMA
+// is already stopped), so there is no producer to race — but flushing a
+// single byte over USB per call would still crawl: each la_cdc_write_all
+// pays TinyUSB bookkeeping and, on a full TX ring, a usb_composite_task
+// pump + 1ms wait, per byte. Buffer into SUMP_WRITE_CHUNK_BYTES-sized
+// chunks — same size as la_stream_and_finish's binary chunk — and flush
+// with la_cdc_write_all(), which retries/gives-up once per chunk instead
+// of once per byte. do_arm() calls the yield callback right after
+// streaming the last sample of a capture (its trailing yield), so
+// flushing the pending chunk from sump_yield_cb also guarantees the final
+// partial chunk goes out without needing a dedicated "end of capture"
+// hook.
 //
 // write_byte is also the ONLY output path emit_metadata()/CMD_ID use — it's
 // shared by every SUMP reply, not just do_arm()'s sample stream. Those

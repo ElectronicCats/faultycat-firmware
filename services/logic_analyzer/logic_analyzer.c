@@ -181,7 +181,6 @@ bool la_start(uint32_t sample_interval_us) {
     };
     hal_pio_sm_configure(s_pio, LA_PIO_SM, s_pio_off, &cfg);
     hal_pio_sm_clear_fifos(s_pio, LA_PIO_SM);
-    hal_pio_sm_set_enabled(s_pio, LA_PIO_SM, true);
 
     // Ring mode, byte-wide: each sample is the low byte of the PIO RX
     // FIFO word (GP0..GP7, see LA_PIO program comment above). src is
@@ -189,6 +188,12 @@ bool la_start(uint32_t sample_interval_us) {
     // wraps every LA_CAPTURE_BUFFER_BYTES. The transfer never ends on
     // its own (LA_FOREVER) — la_stop aborts it, and la_total()
     // derives progress from the decrementing count.
+    //
+    // Armed BEFORE the SM is enabled: the DREQ-paced DMA just idles
+    // until the first FIFO push, whereas the reverse order lets the SM
+    // fill the 4-deep RX FIFO and stall on `push` while the DMA is
+    // still being configured, giving the first few samples irregular
+    // spacing.
     hal_dma_cfg_t dma_cfg = {
         .size            = HAL_DMA_SIZE_8,
         .read_increment  = false,
@@ -199,6 +204,7 @@ bool la_start(uint32_t sample_interval_us) {
     };
     hal_dma_configure(s_dma, &dma_cfg, s_buffer, hal_pio_sm_rxfifo_register(s_pio, LA_PIO_SM),
                       LA_FOREVER, true);
+    hal_pio_sm_set_enabled(s_pio, LA_PIO_SM, true);
 
     s_running = true;
     return true;
