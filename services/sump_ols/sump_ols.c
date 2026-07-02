@@ -54,7 +54,11 @@ typedef struct {
     uint32_t arg_acc;      // little-endian accumulator for the long
                            // command currently being read.
     uint32_t interval_us;  // from the last CMD_SET_DIVIDER.
-    uint32_t n_samples;    // from the last CMD_CAPTURE_SIZE.
+    uint32_t n_samples;    // from the last CMD_CAPTURE_SIZE (readcount*4).
+    uint32_t n_post;       // CAPTURE_SIZE delaycount*4: samples captured
+                           // AFTER the trigger; the rest of n_samples is
+                           // pre-trigger history. 0 (memset default, no
+                           // CAPTURE_SIZE seen) = all post-trigger.
     uint8_t trigger_mask;  // stage-0 basic trigger; NUM_PROBES_LONG=8 so
     uint8_t trigger_value; // one byte covers every exposed channel.
                            // mask == 0 (memset default) = match anything.
@@ -179,8 +183,8 @@ static void do_arm(void) {
         uint32_t written = la_total();
         if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
             // DMA lapped the unconsumed pre-trigger region — skip to the
-            // oldest sample still in the ring (pre-trigger samples are
-            // discarded anyway, so nothing of value is lost).
+            // oldest sample still in the ring. Best-effort: this can eat
+            // pre-trigger history phase 2's window would have included.
             cursor = written - LA_CAPTURE_BUFFER_BYTES;
         }
         bool matched = false;
@@ -198,13 +202,38 @@ static void do_arm(void) {
             s_sump.cb.yield(s_sump.cb.user); // keep CDC/USB alive while waiting
     }
 
-    // Phase 2 — bounded acquisition: the DMA runs alone until the ring
-    // holds the n post-trigger samples (la_total() - cursor is the
-    // wrap-safe count of them), then freezes. The DMA overshoots past n
-    // between the last poll and la_stop(), but n <= half the ring, so
-    // the overshoot lands in the free half instead of overwriting
-    // [cursor, cursor+n).
-    while (la_total() - cursor < n) {
+    // Phase 2 — bounded acquisition. SUMP's CAPTURE_SIZE splits the
+    // window around the trigger: delaycount*4 samples run AFTER the
+    // trigger, the rest is served from BEFORE it (PulseView's
+    // "pre-trigger capture ratio"). The ring already holds that
+    // pre-trigger history — phase 1 scanned straight past it — so the
+    // window simply starts `pre` samples behind the cursor, clamped to
+    // what has actually been captured (a trigger can fire before `pre`
+    // samples even exist; the shortfall extends the post-trigger wait so
+    // exactly n samples always go out). Without pre-trigger history a
+    // capture starts dead on the trigger sample, which for UART means no
+    // idle-high line before the first start bit — PulseView's decoder
+    // then has no falling edge to sync on and misframes the first burst.
+    // The DMA overshoots past the fill between the last poll and
+    // la_stop(), but n <= half the ring, so the overshoot lands in the
+    // free half instead of overwriting [start, start+n).
+    uint32_t post = (s_sump.n_post != 0u) ? s_sump.n_post : n;
+    if (post > n)
+        post = n;
+    uint32_t pre = n - post;
+    // Floor the history when a real trigger is armed: ratio 0 (the
+    // PulseView default) means pre == 0, which starts the window dead on
+    // the trigger sample and leaves serial decoders nothing to sync on —
+    // see SUMP_OLS_PRETRIGGER_MIN in the header.
+    uint32_t pre_floor = SUMP_OLS_PRETRIGGER_MIN;
+    if (pre_floor > n / 8u)
+        pre_floor = n / 8u;
+    if (s_sump.trigger_mask != 0u && pre < pre_floor)
+        pre = pre_floor;
+    if (pre > cursor)
+        pre = cursor;
+    uint32_t start = cursor - pre;
+    while (la_total() - start < n) {
         if (s_sump.cb.yield)
             s_sump.cb.yield(s_sump.cb.user);
     }
@@ -220,7 +249,7 @@ static void do_arm(void) {
     // USB can take as long as it needs. The trailing yield flushes
     // main.c's final partial write chunk (its flush hook).
     for (uint32_t streamed = 0u; streamed < n; streamed++) {
-        emit(buf[(cursor + (n - 1u - streamed)) % LA_CAPTURE_BUFFER_BYTES]);
+        emit(buf[(start + (n - 1u - streamed)) % LA_CAPTURE_BUFFER_BYTES]);
         yield_if_due(streamed);
     }
     if (s_sump.cb.yield)
@@ -343,13 +372,18 @@ void sump_ols_feed_byte(uint8_t b) {
         case SUMP_OLS_CAPTURE_SIZE_B3: {
             s_sump.arg_acc |= (uint32_t)b << 24;
             // arg = WL16(readcount-1) | WL16(delaycount-1) << 16
-            // (sigrok protocol.c::ols_prepare_acquisition). readcount
-            // is in units of 4 samples; delaycount (pre-trigger) is
-            // ignored — every ARM captures post-trigger only.
-            uint16_t readcount_minus_1 = (uint16_t)(s_sump.arg_acc & 0xFFFFu);
-            uint32_t readcount         = (uint32_t)readcount_minus_1 + 1u;
-            s_sump.n_samples           = readcount * 4u;
-            s_sump.state               = SUMP_OLS_IDLE;
+            // (sigrok protocol.c::ols_prepare_acquisition), both in
+            // units of 4 samples. readcount is the total window;
+            // delaycount is the portion captured AFTER the trigger —
+            // sigrok computes it as readcount * (100 - capture_ratio) /
+            // 100, so the remainder is PulseView's pre-trigger ratio,
+            // served from ring history in do_arm's phase 2. With ratio 0
+            // (the default) delaycount == readcount: all post-trigger.
+            uint16_t readcount_minus_1  = (uint16_t)(s_sump.arg_acc & 0xFFFFu);
+            uint16_t delaycount_minus_1 = (uint16_t)((s_sump.arg_acc >> 16) & 0xFFFFu);
+            s_sump.n_samples            = ((uint32_t)readcount_minus_1 + 1u) * 4u;
+            s_sump.n_post               = ((uint32_t)delaycount_minus_1 + 1u) * 4u;
+            s_sump.state                = SUMP_OLS_IDLE;
             return;
         }
 

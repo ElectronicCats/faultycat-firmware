@@ -36,7 +36,13 @@
 // docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md). ARM's sample dump goes
 // out in reverse chronological order (newest first) — the SUMP
 // convention sigrok's ols driver un-reverses on receive; sending
-// oldest-first renders every capture time-mirrored in PulseView. Stage-0 trigger
+// oldest-first renders every capture time-mirrored in PulseView.
+// CAPTURE_SIZE's delaycount is honored: sigrok derives it from
+// PulseView's "pre-trigger capture ratio", and the pre-trigger portion
+// of the window is served from ring history — without it a capture
+// starts dead on the trigger sample and (e.g.) a UART decoder never
+// sees the idle line before the first start bit, misframing the burst.
+// Stage-0 trigger
 // mask/value (CMD_SET_TRIGGER_MASK/VALUE, 0xC0/0xC1) are parsed and
 // used to delay the capture start until the first matching sample;
 // stage-0 config (0xC2) and every higher stage (0xC4..0xCE) are still
@@ -135,6 +141,18 @@ uint8_t sump_ols_trigger_value(void);
 // `la <us> <n> bin` shell command still offers best-effort unbounded
 // streaming for raw captures.
 #define SUMP_OLS_MAX_SAMPLES 16384u
+
+// Minimum pre-trigger history (samples) for any capture with a real
+// trigger configured, even when the host asks for none: PulseView's
+// pre-trigger capture ratio defaults to 0%, and a window that starts
+// dead on the trigger sample gives serial decoders nothing to sync on
+// (a UART start bit with no preceding idle-high has no falling edge),
+// misframing the whole first burst. 32 samples ≈ 3-4 bit times at the
+// 1 MHz / 115200-baud sweet spot. Capped at n/8 so tiny captures keep
+// their post-trigger samples; a larger host-requested ratio wins. The
+// window shifts back by the same amount — SUMP hosts tolerate that (the
+// sample count is unchanged; only the ratio-0 trigger marker drifts).
+#define SUMP_OLS_PRETRIGGER_MIN 32u
 
 // Fallback sample interval (microseconds) used by CMD_ARM if the host
 // never sent CMD_SET_DIVIDER first — shouldn't happen in practice
