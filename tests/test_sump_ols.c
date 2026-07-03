@@ -332,6 +332,31 @@ static void test_reset_when_idle_is_safe(void) {
 }
 
 // -----------------------------------------------------------------------------
+// CMD_FORCE_EXIT (0x0F) — host-initiated escape back to the text
+// shell, replacing the old DTR-drop-triggered exit (see
+// docs/WINDOWS_SUMP_DTR_ISSUE.md). Mirrors buspirate_compat's
+// BP_CMD_USER_TERM convention.
+// -----------------------------------------------------------------------------
+
+static int s_on_exit_calls;
+static void fix_on_exit(void* u) {
+    (void)u;
+    s_on_exit_calls++;
+}
+
+static void test_force_exit_invokes_on_exit_callback(void) {
+    sump_ols_callbacks_t cb = TEST_CB;
+    cb.on_exit              = fix_on_exit;
+    sump_ols_init(&cb);
+    s_on_exit_calls = 0;
+
+    uint8_t force_exit = 0x0Fu;
+    feed(&force_exit, 1u);
+
+    TEST_ASSERT_EQUAL_UINT32(1u, s_on_exit_calls);
+}
+
+// -----------------------------------------------------------------------------
 // Stage-0 basic trigger (CMD_SET_TRIGGER_MASK 0xC0 / VALUE 0xC1). PulseView
 // sends these when the user arms a capture with a trigger condition; with
 // none configured it sends neither, so trigger_mask stays 0 (match-anything)
@@ -523,6 +548,7 @@ int main(void) {
     RUN_TEST(test_unknown_short_command_is_ignored);
 
     RUN_TEST(test_reset_when_idle_is_safe);
+    RUN_TEST(test_force_exit_invokes_on_exit_callback);
 
     RUN_TEST(test_no_trigger_configured_starts_immediately);
     RUN_TEST(test_trigger_mask_value_parsed_from_wire);
