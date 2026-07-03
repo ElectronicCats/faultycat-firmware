@@ -71,12 +71,32 @@ and pick the decoder.
 
 | Command | Purpose |
 |---|---|
-| `la <us> <n> [bin]` | Raw capture of GP0..GP7: `n` samples at `<us>` µs/sample, dumped as hex (or `bin` for raw bytes). |
+| `la <us> <n> [bin] [trig=<ch>[:<timeout_ms>]]` | Raw capture of GP0..GP7: `n` samples at `<us>` µs/sample, dumped as hex (or `bin` for raw bytes). |
 | `la sump enter` | Enter SUMP/OLS mode for PulseView/sigrok (driver `ols`). Exits on the host sending `CMD_FORCE_EXIT` (0x0F) — see `services/sump_ols/sump_ols.c`. |
 
 Both always capture the full GP0..GP7 bank. There are no per-protocol
 commands — wiring + the host-side decoder is what makes it "an I2C
 capture" or "a UART capture".
+
+### Raw-path trigger (`trig=<ch>`)
+
+Omitting `trig=` starts the `n`-sample window the instant the command
+runs, same as always — fine for an already-toggling bus, but on an idle
+line it can capture nothing, or lock onto a mid-byte transition instead
+of a real start bit (see
+`LA_CAPTURE_TRIGGER_IMPLEMENTATION_PLAN.md`). `trig=<ch>` blocks the
+window's start until channel `ch` goes low (idle-high assumed), then
+backs the window up by up to `LA_PRETRIGGER_MIN` (32) samples — capped
+at `n/8` for small captures — so a decoder has idle line to sync on,
+mirroring `SUMP_OLS_PRETRIGGER_MIN`'s reasoning for the PulseView path.
+The optional `:<timeout_ms>` bounds the wait (firmware default: 5000ms);
+if it elapses first the command replies `LA: ERR trigger_timeout`
+instead of hanging the shell.
+
+From `faultycmd`: `la capture --decode uart` enables this automatically
+(trigger channel defaults to `--rx`); pass `--trigger`/`--no-trigger`,
+`--trigger-ch`, and `--trigger-timeout-s` to control it directly,
+including for `--decode none`/custom wiring.
 
 ## Pin mapping per protocol (convention, not enforced)
 
