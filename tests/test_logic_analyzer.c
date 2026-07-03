@@ -59,6 +59,15 @@ static void simulate_written(int ch, uint32_t n) {
     hal_fake_dma_set_transfer_count(ch, FOREVER - n);
 }
 
+// The fake DMA doesn't copy bytes, so trigger-match tests need the ring
+// poked with known samples directly — same cast-away-const pattern
+// test_sump_ols.c's preload_ring() uses.
+static void preload_ring(uint32_t offset, const uint8_t* bytes, size_t n) {
+    uint8_t* ring = (uint8_t*)la_buffer();
+    for (size_t i = 0; i < n; i++)
+        ring[(offset + i) % LA_CAPTURE_BUFFER_BYTES] = bytes[i];
+}
+
 // -----------------------------------------------------------------------------
 // init / deinit
 // -----------------------------------------------------------------------------
@@ -223,6 +232,73 @@ static void test_total_is_zero_after_deinit(void) {
 }
 
 // -----------------------------------------------------------------------------
+// la_wait_for_trigger / la_apply_pretrigger
+// -----------------------------------------------------------------------------
+
+// mask == 0 must match as soon as any sample exists — the degenerate
+// case that makes `trig=` omitted byte-for-byte equivalent to no
+// trigger. Regression guard for that backward-compat claim.
+static void test_wait_for_trigger_mask_zero_matches_immediately(void) {
+    TEST_ASSERT_TRUE(la_init());
+    int ch = claimed_dma_channel();
+    TEST_ASSERT_TRUE(la_start(1u));
+    simulate_written(ch, 1u);
+
+    uint32_t cursor = la_wait_for_trigger(0u, 0u, NULL, NULL, 0u);
+    TEST_ASSERT_EQUAL_UINT32(0u, cursor);
+}
+
+// Idle-high samples (bit 0 = 1) followed by a low sample (bit 0 = 0): a
+// mask/value selecting "bit 0 low" must skip the idle samples and return
+// the cursor of the triggering sample, not sample 0.
+static void test_wait_for_trigger_matches_first_low_sample(void) {
+    TEST_ASSERT_TRUE(la_init());
+    int ch = claimed_dma_channel();
+    TEST_ASSERT_TRUE(la_start(1u));
+
+    uint8_t samples[] = {0x01u, 0x01u, 0x00u, 0xAAu};
+    preload_ring(0u, samples, sizeof(samples));
+    simulate_written(ch, sizeof(samples));
+
+    uint32_t cursor = la_wait_for_trigger(0x01u, 0x00u, NULL, NULL, 0u);
+    TEST_ASSERT_EQUAL_UINT32(2u, cursor);
+}
+
+static uint32_t s_timeout_yield_calls;
+static void timeout_yield_cb(void* u) {
+    (void)u;
+    s_timeout_yield_calls++;
+    hal_fake_time_advance_ms(10u);
+}
+
+// No matching sample ever arrives: the wait must give up once
+// timeout_ms elapses (rather than hang) and must have kept pumping
+// yield() while blocked, the same busy-loop/USB-starvation guard
+// test_arm_polls_yield_while_waiting_for_trigger checks for do_arm().
+static void test_wait_for_trigger_times_out(void) {
+    TEST_ASSERT_TRUE(la_init());
+    TEST_ASSERT_TRUE(la_start(1u));
+    // No simulate_written call: la_total() stays 0, so no sample is
+    // ever visible to match against.
+    s_timeout_yield_calls = 0u;
+
+    uint32_t cursor = la_wait_for_trigger(0x01u, 0x00u, timeout_yield_cb, NULL, 50u);
+    TEST_ASSERT_EQUAL_UINT32(LA_NO_TRIGGER_MATCH, cursor);
+    TEST_ASSERT_TRUE(s_timeout_yield_calls >= 1u);
+}
+
+// cursor near 0 (no history to serve) clamps to 0 instead of
+// underflowing; a small n caps the pretrigger at n/8 rather than the
+// full LA_PRETRIGGER_MIN — same edge cases do_arm() handles inline in
+// services/sump_ols/sump_ols.c, covered once here instead of never.
+static void test_apply_pretrigger_floors_and_caps(void) {
+    TEST_ASSERT_EQUAL_UINT32(0u, la_apply_pretrigger(5u, 1000u)); // 5 < LA_PRETRIGGER_MIN
+    TEST_ASSERT_EQUAL_UINT32(1000u - LA_PRETRIGGER_MIN,
+                             la_apply_pretrigger(1000u, 1000u)); // full floor available
+    TEST_ASSERT_EQUAL_UINT32(40u - (32u / 8u), la_apply_pretrigger(40u, 32u)); // n/8 cap
+}
+
+// -----------------------------------------------------------------------------
 // Runner
 // -----------------------------------------------------------------------------
 
@@ -248,6 +324,11 @@ int main(void) {
     RUN_TEST(test_total_reflects_partial_progress);
     RUN_TEST(test_total_counts_past_buffer_size);
     RUN_TEST(test_total_is_zero_after_deinit);
+
+    RUN_TEST(test_wait_for_trigger_mask_zero_matches_immediately);
+    RUN_TEST(test_wait_for_trigger_matches_first_low_sample);
+    RUN_TEST(test_wait_for_trigger_times_out);
+    RUN_TEST(test_apply_pretrigger_floors_and_caps);
 
     return UNITY_END();
 }
