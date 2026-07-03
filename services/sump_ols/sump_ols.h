@@ -18,9 +18,15 @@
 // (apps/faultycat_fw/main.c): a text command on the CDC2 shell
 // (`la sump enter`) calls la_init() and flips
 // SHELL_MODE_SUMP; every subsequent byte is fed here instead of the
-// line parser. Like serprog, SUMP has no in-band escape byte back to
-// text mode, so leaving the mode relies on host DTR-drop detection
-// (main.c's disconnect handler) calling sump_ols_on_exit().
+// line parser. Leaving the mode is host-initiated via an explicit
+// escape byte (CMD_FORCE_EXIT, mirrors buspirate_compat's own
+// BP_CMD_USER_TERM 0x0F convention) rather than DTR-drop detection —
+// see sump_ols.c. This used to depend on the host dropping DTR, which
+// Windows' CDC-ACM driver does unconditionally on close regardless of
+// what the session actually needed (see
+// faultycat-TUI/docs/WINDOWS_SUMP_DTR_ISSUE.md for the history); the
+// explicit byte works identically on every host OS since it's just
+// wire data, not a pin state.
 //
 // Protocol values below were confirmed against the live sigrok
 // `libsigrok/src/hardware/openbench-logic-sniffer/{protocol.h,
@@ -56,9 +62,9 @@ typedef struct {
     void (*yield)(void* user);   // called periodically while streaming
                                  // ARM's capture data, to keep tud_task
                                  // / other CDC pumps alive.
-    void (*on_exit)(void* user); // SUMP has no in-band exit byte; the
-                                 // main loop's DTR-drop disconnect
-                                 // handler calls this directly.
+    void (*on_exit)(void* user); // Fired by CMD_FORCE_EXIT (0x0F) —
+                                 // the host's explicit request to
+                                 // leave SUMP mode. See sump_ols.c.
     void* user;
 } sump_ols_callbacks_t;
 

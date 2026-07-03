@@ -1161,21 +1161,6 @@ static void sump_on_exit_cb(void* u) {
     shell_print("\nSUMP: OK exited (back to text shell)\n");
 }
 
-// Grace window for the disconnect-triggered SUMP teardown below.
-// Windows' usbser.sys driver drops DTR on CloseHandle() as part of its
-// normal cleanup — unlike POSIX there's no HUPCL-equivalent to suppress
-// that, so the drop happens the instant faultycmd closes CDC2, well
-// before PulseView's GUI has even finished launching, let alone before
-// the operator clicks "Scan for devices" (see
-// docs/WINDOWS_SUMP_DTR_ISSUE.md). That means this isn't a brief
-// microsecond race to debounce: the realistic gap is however long it
-// takes a human to alt-tab to PulseView and click Scan, easily several
-// seconds. Give that whole human-paced window before tearing the
-// session down, rather than reacting to the first disconnected tick.
-#define SUMP_EXIT_GRACE_MS 60000u
-
-static uint32_t s_sump_disconnect_at_ms; // 0 == not currently pending exit
-
 static const sump_ols_callbacks_t SUMP_CALLBACKS = {
     .write_byte = sump_write_byte_cb,
     .yield      = sump_yield_cb,
@@ -1186,9 +1171,10 @@ static const sump_ols_callbacks_t SUMP_CALLBACKS = {
 // `la sump enter` — enter SUMP/OLS mode for PulseView/sigrok. Captures
 // the full GP0..GP7 bank; the operator wires whichever signals they want
 // and picks the matching decoder host-side (see docs/LOGIC_ANALYZER.md).
-// The SUMP callbacks and grace-period disconnect logic defined above
-// already apply to any SHELL_MODE_SUMP session, so no main-loop changes
-// are needed for the SUMP path.
+// The session stays armed until the host sends CMD_FORCE_EXIT (0x0F,
+// see sump_ols.c) — faultycmd's `force_exit_sump()` sends it once
+// PulseView is done. No DTR/timing dependency, no main-loop changes
+// needed for the SUMP path.
 static void cmd_la_sump_enter(int argc, char** argv) {
     // argv: la sump enter
     if (argc < 3 || strcmp(argv[2], "enter") != 0) {
@@ -1208,8 +1194,7 @@ static void cmd_la_sump_enter(int argc, char** argv) {
     }
     sump_ols_init(&SUMP_CALLBACKS);
     shell_print("LA: OK entering SUMP mode ch=GP0..GP7\n");
-    shell_print("LA: point PulseView/sigrok-cli (driver 'ols') at this port NOW —\n");
-    shell_print("LA: DTR dropping before that re-arms text mode and loses this session\n");
+    shell_print("LA: point PulseView/sigrok-cli (driver 'ols') at this port NOW\n");
     // Set mode AFTER the prints, same ordering reason as buspirate/serprog.
     s_shell_mode = SHELL_MODE_SUMP;
 }
@@ -2013,25 +1998,16 @@ int main(void) {
         // the shell so the next session starts clean. BusPirate has
         // its own 0x0F escape but a crashed OpenOCD won't send it;
         // serprog has no protocol exit at all and depends on this.
+        // SUMP has its own explicit exit byte too (CMD_FORCE_EXIT,
+        // see sump_ols.c) and no longer tears down on DTR drop — see
+        // faultycat-TUI/docs/WINDOWS_SUMP_DTR_ISSUE.md for why relying
+        // on DTR here was unreliable in the first place.
         if (last_scanner_conn && !conn) {
             if (s_shell_mode == SHELL_MODE_BUSPIRATE) {
                 bp_on_exit_cb(NULL);
             } else if (s_shell_mode == SHELL_MODE_SERPROG) {
                 sp_on_exit_cb(NULL);
-            } else if (s_shell_mode == SHELL_MODE_SUMP) {
-                // Grace period, not a debounce — see SUMP_EXIT_GRACE_MS
-                // above. A reconnect before it elapses (PulseView
-                // opening the port once the operator clicks Scan)
-                // cancels this below instead of losing the session.
-                s_sump_disconnect_at_ms = hal_now_ms();
             }
-        }
-        if (conn) {
-            s_sump_disconnect_at_ms = 0;
-        } else if (s_shell_mode == SHELL_MODE_SUMP && s_sump_disconnect_at_ms != 0 &&
-                   (uint32_t)(hal_now_ms() - s_sump_disconnect_at_ms) >= SUMP_EXIT_GRACE_MS) {
-            sump_on_exit_cb(NULL);
-            s_sump_disconnect_at_ms = 0;
         }
         last_scanner_conn = conn;
 

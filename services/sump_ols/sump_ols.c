@@ -22,6 +22,14 @@
 #define CMD_SET_DIVIDER       0x80u
 #define CMD_CAPTURE_SIZE      0x81u
 
+// Host-initiated exit back to the text shell. 0x0F is never sent by
+// sigrok's ols driver as a top-level command byte (only reachable in
+// SUMP_OLS_IDLE, i.e. between commands — never mid-argument), and
+// mirrors buspirate_compat's BP_CMD_USER_TERM, the same "0x0F = leave
+// this binary mode" convention already used elsewhere in this
+// firmware. Replaces the old DTR-drop-triggered exit (see sump_ols.h).
+#define CMD_FORCE_EXIT 0x0Fu
+
 // Basic trigger, stage 0. Confirmed against sigrok's
 // openbench-logic-sniffer/protocol.h (CMD_SET_TRIGGER_MASK 0xC0,
 // CMD_SET_TRIGGER_VALUE 0xC1, CMD_SET_TRIGGER_CONFIG 0xC2) and
@@ -303,6 +311,10 @@ void sump_ols_feed_byte(uint8_t b) {
                     return;
                 case CMD_METADATA:
                     emit_metadata();
+                    return;
+                case CMD_FORCE_EXIT:
+                    if (s_sump.cb.on_exit)
+                        s_sump.cb.on_exit(s_sump.cb.user);
                     return;
                 case CMD_SET_DIVIDER:
                     s_sump.arg_acc = 0u;
