@@ -72,7 +72,7 @@ and pick the decoder.
 | Command | Purpose |
 |---|---|
 | `la <us> <n> [bin]` | Raw capture of GP0..GP7: `n` samples at `<us>` µs/sample, dumped as hex (or `bin` for raw bytes). |
-| `la sump enter` | Enter SUMP/OLS mode for PulseView/sigrok (driver `ols`). Exits on host DTR-drop. |
+| `la sump enter` | Enter SUMP/OLS mode for PulseView/sigrok (driver `ols`). Exits on the host sending `CMD_FORCE_EXIT` (0x0F) — see `services/sump_ols/sump_ols.c`. |
 
 Both always capture the full GP0..GP7 bank. There are no per-protocol
 commands — wiring + the host-side decoder is what makes it "an I2C
