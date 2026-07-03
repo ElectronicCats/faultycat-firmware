@@ -32,6 +32,7 @@
 #include "hal/dma.h"
 #include "hal/gpio.h"
 #include "hal/pio.h"
+#include "hal/time.h"
 
 // RP2040 default system clock. The firmware never reprograms clk_sys (no
 // set_sys_clock call anywhere), so 125 MHz is exact here.
@@ -233,4 +234,40 @@ uint32_t la_total(void) {
 
 const uint8_t* la_buffer(void) {
     return s_buffer;
+}
+
+uint32_t la_wait_for_trigger(uint8_t mask, uint8_t value, void (*yield)(void* user), void* user,
+                             uint32_t timeout_ms) {
+    uint32_t start_ms = hal_now_ms();
+    uint32_t cursor   = 0u;
+
+    for (;;) {
+        uint32_t written = la_total();
+        if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
+            // DMA lapped the unconsumed region — skip to the oldest
+            // sample still in the ring. Best-effort: this can eat
+            // pre-trigger history la_apply_pretrigger would have served.
+            cursor = written - LA_CAPTURE_BUFFER_BYTES;
+        }
+        while (cursor < written) {
+            uint8_t s = s_buffer[cursor % LA_CAPTURE_BUFFER_BYTES];
+            if ((s & mask) == (value & mask))
+                return cursor;
+            cursor++;
+        }
+        if (timeout_ms != 0u && (uint32_t)(hal_now_ms() - start_ms) >= timeout_ms)
+            return LA_NO_TRIGGER_MATCH;
+        if (yield)
+            yield(user);
+    }
+}
+
+uint32_t la_apply_pretrigger(uint32_t cursor, uint32_t n) {
+    uint32_t pre_floor = LA_PRETRIGGER_MIN;
+    if (pre_floor > n / 8u)
+        pre_floor = n / 8u;
+    uint32_t pre = pre_floor;
+    if (pre > cursor)
+        pre = cursor;
+    return cursor - pre;
 }

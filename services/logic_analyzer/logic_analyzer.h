@@ -124,3 +124,39 @@ uint32_t la_total(void);
 // modulo LA_CAPTURE_BUFFER_BYTES against a la_total()-derived cursor
 // (see la_start).
 const uint8_t* la_buffer(void);
+
+// Minimum pre-trigger history applied by la_apply_pretrigger — mirrors
+// SUMP_OLS_PRETRIGGER_MIN (services/sump_ols/sump_ols.h): a window that
+// starts dead on the trigger sample gives a serial decoder no idle-high
+// to sync on. Capped at n/8 for small captures (see la_apply_pretrigger).
+#define LA_PRETRIGGER_MIN 32u
+
+// Sentinel returned by la_wait_for_trigger when timeout_ms elapses with
+// no match.
+#define LA_NO_TRIGGER_MATCH UINT32_MAX
+
+// Blocking wait for a sample matching (sample & mask) == (value & mask).
+// mask == 0 matches as soon as any sample is available (degenerates to
+// "no trigger configured" — immediate start). Calls yield(user)
+// periodically while waiting so USB/CDC stays serviced. Requires a
+// capture already running (la_start).
+//
+// Same wait-then-scan loop services/sump_ols/sump_ols.c's do_arm() hand-
+// rolls for its stage-0 trigger, lifted out so it has one implementation
+// instead of two — do_arm() itself is not changed to call this (see
+// LA_CAPTURE_TRIGGER_IMPLEMENTATION_PLAN.md's "Out of scope").
+//
+// Returns the ring cursor (in la_total()'s absolute sample numbering) of
+// the matching sample, or LA_NO_TRIGGER_MATCH if timeout_ms elapses
+// first (0 = wait forever — only safe for host tests; real callers must
+// pass a nonzero timeout so an unresponsive target can't hang forever).
+uint32_t la_wait_for_trigger(uint8_t mask, uint8_t value, void (*yield)(void* user), void* user,
+                             uint32_t timeout_ms);
+
+// Given a trigger cursor from la_wait_for_trigger and the total sample
+// count `n` about to be captured, returns the adjusted start cursor that
+// reserves up to LA_PRETRIGGER_MIN samples of pre-trigger history —
+// capped at n/8 for small captures, and at `cursor` itself when less
+// history than that has actually been captured yet. Mirrors do_arm()'s
+// pretrigger math in services/sump_ols/sump_ols.c.
+uint32_t la_apply_pretrigger(uint32_t cursor, uint32_t n);

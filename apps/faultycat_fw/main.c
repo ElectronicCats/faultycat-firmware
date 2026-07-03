@@ -185,7 +185,7 @@ static void shell_help(void) {
         "SHELL:   i2c probe <sda> <scl>                       rescan addrs on known pins\n");
     shell_print("SHELL: --- Logic analyzer (protocol-agnostic, GP0..GP7) ---\n");
     shell_print(
-        "SHELL:   la <us> <n> [bin]                           raw GP0..GP7 capture, hex/binary\n");
+        "SHELL:   la <us> <n> [bin] [trig=<ch>[:<ms>]]        raw GP0..GP7 capture, hex/binary\n");
     shell_print(
         "SHELL:   la sump enter                               SUMP/OLS for PulseView/sigrok\n");
     shell_print("SHELL:                                                exit on host disconnect\n");
@@ -720,6 +720,13 @@ static void cmd_i2c_probe(int argc, char** argv) {
 // firmware giving up mid-transfer.
 #define LA_WRITE_RETRY_MAX_MS 5000u
 
+// Default bound on cmd_la's trigger wait (`trig=<ch>`), overridable per
+// call via `trig=<ch>:<timeout_ms>`. Unlike SUMP (whose trigger wait is
+// bounded by the user closing PulseView / sending CMD_FORCE_EXIT), a
+// shell command must hand control back to the CLI on its own — an idle
+// or unresponsive target must not hang the whole CDC shell.
+#define LA_TRIGGER_TIMEOUT_MS 5000u
+
 // Write `len` bytes to the scanner CDC, retrying partial writes while
 // pumping USB. tud_cdc_n_write() (behind usb_composite_cdc_write) silently
 // truncates when the TX ring buffer is full instead of blocking — at full
@@ -744,8 +751,11 @@ static bool la_cdc_write_all(const char* data, size_t len) {
 }
 
 // Drains the logic analyzer's ring to the scanner CDC for exactly `n`
-// samples, then stops/deinits the capture and releases the SWD bus owner
-// token. Used by cmd_la after it prints the summary line.
+// samples starting at `start` (a la_total()-space cursor — 0 for the
+// no-trigger case, or the trigger+pretrigger-adjusted cursor cmd_la
+// computes via la_wait_for_trigger/la_apply_pretrigger), then
+// stops/deinits the capture and releases the SWD bus owner token. Used
+// by cmd_la after it prints the summary line.
 //
 // `binary`: false sends each sample as 2 hex chars (human-readable, safe
 // over a text shell, but ~2x the bytes-on-wire of the raw samples — at fast
@@ -755,22 +765,23 @@ static bool la_cdc_write_all(const char* data, size_t len) {
 // headroom to keep up. Either way the host already knows `n` from the
 // summary line it just received, so it reads exactly `n` bytes (binary) or
 // `n*2` hex chars (text) — no in-band framing needed for either format.
-static void la_stream_and_finish(uint32_t n, bool binary) {
+static void la_stream_and_finish(uint32_t start, uint32_t n, bool binary) {
     const uint8_t* buf = la_buffer();
-    uint32_t cursor    = 0u; // samples already streamed
+    uint32_t cursor    = start; // samples streamed so far, in la_total() space
+    uint32_t end       = start + n;
     bool overflow      = false;
     bool gave_up       = false;
 
     // Drain the ring continuously until n samples have streamed. The PIO
     // SM paces samples regardless of bus activity, so la_total()
-    // always advances and this loop always terminates at n.
+    // always advances and this loop always terminates at end.
     if (binary) {
         uint8_t chunk[64];
         size_t pos = 0;
-        while (cursor < n && !gave_up) {
+        while (cursor < end && !gave_up) {
             uint32_t written = la_total();
-            if (written > n)
-                written = n;
+            if (written > end)
+                written = end;
             if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
                 overflow = true;
                 cursor   = written - LA_CAPTURE_BUFFER_BYTES;
@@ -793,10 +804,10 @@ static void la_stream_and_finish(uint32_t n, bool binary) {
     } else {
         char line[80];
         size_t pos = 0;
-        while (cursor < n && !gave_up) {
+        while (cursor < end && !gave_up) {
             uint32_t written = la_total();
-            if (written > n)
-                written = n; // don't stream past the requested count
+            if (written > end)
+                written = end; // don't stream past the requested count
             // If the DMA lapped the cursor, those samples are gone — skip
             // to the oldest still in the ring and flag it once.
             if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
@@ -835,25 +846,69 @@ static void la_stream_and_finish(uint32_t n, bool binary) {
         usb_composite_cdc_write_str(USB_CDC_SCANNER, "\nOVERFLOW\n");
 }
 
-// `la <us> <n> [bin]` — protocol-agnostic raw capture of GP0..GP7.
-// Always samples the full 8-channel bank; which channel carries which
-// signal is up to how the operator wires the header (see
-// docs/LOGIC_ANALYZER.md). For host-side protocol decode use `la sump
-// enter` (PulseView) instead.
+// Yield callback for la_wait_for_trigger's blocking wait — keeps USB
+// serviced while cmd_la blocks for a trigger match. Minimal on purpose:
+// unlike sp_yield_cb/sump_yield_cb, cmd_la doesn't interact with the
+// EMFI/crowbar campaign services, so there's nothing else to pump here.
+static void la_trigger_yield_cb(void* u) {
+    (void)u;
+    usb_composite_task();
+}
+
+// `la <us> <n> [bin] [trig=<ch>[:<timeout_ms>]]` — protocol-agnostic raw
+// capture of GP0..GP7. Always samples the full 8-channel bank; which
+// channel carries which signal is up to how the operator wires the
+// header (see docs/LOGIC_ANALYZER.md). For host-side protocol decode use
+// `la sump enter` (PulseView) instead.
+//
+// `trig=<ch>` blocks the capture window's start until channel `ch` goes
+// low (idle-high assumed — an edge trigger would need real edge-detection
+// state this doesn't have, see LA_CAPTURE_TRIGGER_IMPLEMENTATION_PLAN.md),
+// then backs the window up by up to LA_PRETRIGGER_MIN samples so a
+// decoder (e.g. UART) has idle history to sync on. Omitting `trig=` is
+// byte-for-byte today's behavior: mask 0 matches as soon as any sample
+// exists, so the window still effectively starts at sample 0.
 static void cmd_la(int argc, char** argv) {
     if (argc < 3) {
-        shell_print("LA: ERR usage: la <us> <n> [bin]\n");
+        shell_print("LA: ERR usage: la <us> <n> [bin] [trig=<ch>[:<timeout_ms>]]\n");
         return;
     }
     if (shell_bus_busy("LA"))
         return;
     uint32_t us = (uint32_t)strtoul(argv[1], NULL, 0);
     uint32_t n  = (uint32_t)strtoul(argv[2], NULL, 0);
-    bool binary = (argc >= 4 && !strcmp(argv[3], "bin"));
+
+    int argi    = 3;
+    bool binary = (argc > argi && !strcmp(argv[argi], "bin"));
+    if (binary)
+        argi++;
+
     if (n == 0u) {
         shell_print("LA: ERR n must be > 0\n");
         return;
     }
+
+    uint8_t trigger_mask        = 0u;
+    uint8_t trigger_value       = 0u;
+    uint32_t trigger_timeout_ms = LA_TRIGGER_TIMEOUT_MS;
+    if (argc > argi && !strncmp(argv[argi], "trig=", 5)) {
+        const char* spec = argv[argi] + 5;
+        int ch           = atoi(spec);
+        if (ch < 0 || ch >= (int)LA_CHANNEL_COUNT) {
+            shell_print("LA: ERR trig channel out of range (0-7)\n");
+            return;
+        }
+        trigger_mask      = LA_SAMPLE_BIT(ch);
+        trigger_value     = 0u; // fire when the channel goes low
+        const char* colon = strchr(spec, ':');
+        if (colon != NULL) {
+            uint32_t ms = (uint32_t)strtoul(colon + 1, NULL, 0);
+            if (ms != 0u)
+                trigger_timeout_ms = ms;
+        }
+        argi++;
+    }
+
     if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER)) {
         shell_print("LA: ERR bus_busy (held by another service)\n");
         return;
@@ -870,10 +925,21 @@ static void cmd_la(int argc, char** argv) {
         return;
     }
 
+    uint32_t cursor = la_wait_for_trigger(trigger_mask, trigger_value, la_trigger_yield_cb, NULL,
+                                          trigger_timeout_ms);
+    if (cursor == LA_NO_TRIGGER_MATCH) {
+        shell_print("LA: ERR trigger_timeout\n");
+        la_stop();
+        la_deinit();
+        swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+        return;
+    }
+    cursor = la_apply_pretrigger(cursor, n);
+
     shell_printf("LA: OK capture ch=GP0..GP7 stream n=%lu interval_us=%lu\n", (unsigned long)n,
                  (unsigned long)us);
 
-    la_stream_and_finish(n, binary);
+    la_stream_and_finish(cursor, n, binary);
 }
 
 static void process_i2c_subcmd(int argc, char** argv) {
