@@ -61,10 +61,10 @@ static void test_ping_assembles_and_replies_with_F5(void) {
     TEST_ASSERT_EQUAL_UINT8(CROWBAR_CMD_PING | 0x80u, reply[1]);
     TEST_ASSERT_EQUAL_UINT8('F', reply[4]);
     TEST_ASSERT_EQUAL_UINT8('5', reply[5]);
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_MAJOR, reply[6]);
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_MINOR, reply[7]);
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_PATCH, reply[8]);
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_TWEAK, reply[9]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_BOARD, reply[6]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_MAJOR, reply[7]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_MINOR, reply[8]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)FW_VERSION_PATCH, reply[9]);
 }
 
 static void test_bad_sof_is_ignored(void) {

@@ -234,65 +234,8 @@ swd_dp_ack_t swd_dp_bus_detect(uint32_t* out_dpidr) {
     return swd_dp_request_idcode(out_dpidr);
 }
 
-// Modern SWD wakeup byte stream (ADIv5.2 dormant-to-SWD), kept for
-// the targeted TARGETSEL connect path. It includes the selection
-// alert, activation, final line reset, and idle cycles in the
-// byte-packed form used by OpenOCD/pyOCD.
-static const uint8_t s_dormant_to_swd[] = {
-    0xffu, 0x92u, 0xf3u, 0x09u, 0x62u, 0x95u, 0x2du, 0x85u, 0x86u, 0xe9u,
-    0xafu, 0xddu, 0xe3u, 0xa2u, 0x0eu, 0xbcu, 0x19u, 0xa0u, 0xf1u, 0xffu,
-    0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0x00u,
-};
-
-static void send_byte_stream(const uint8_t* bytes, uint32_t len) {
-    uint32_t i = 0u;
-    while (i + 4u <= len) {
-        uint32_t v = (uint32_t)bytes[i] | ((uint32_t)bytes[i + 1u] << 8) |
-                     ((uint32_t)bytes[i + 2u] << 16) | ((uint32_t)bytes[i + 3u] << 24);
-        swd_phy_write_bits(32u, v);
-        i += 4u;
-    }
-    while (i < len) {
-        swd_phy_write_bits(8u, bytes[i]);
-        i++;
-    }
-}
-
-static void targetsel_write(uint32_t targetsel) {
-    // SWDv2 TARGETSEL write. The multi-drop convention has all DPs
-    // observe the request/data; the ACK clocks are still emitted for
-    // wire alignment, but the value read during those cycles is not
-    // meaningful.
-    swd_phy_write_bits(8u, 0x99u);
-    swd_phy_hiz_clocks(1u);
-    (void)swd_phy_read_bits(3u);
-    swd_phy_hiz_clocks(1u);
-    swd_phy_write_bits(32u, targetsel);
-    swd_phy_write_bits(1u, swd_dp_compute_parity(targetsel));
-    swd_phy_write_bits(8u, 0u);
-}
-
 swd_dp_ack_t swd_dp_connect(uint32_t targetsel, uint32_t* out_dpidr) {
+    (void)targetsel;
     swd_dp_abort(SWD_ABORT_DAPABORT);
-
-    // Targeted SWDv2 connect for multi-drop-capable DPs (RP2040 is
-    // the board-local reason this exists). This restores the original
-    // flow: force a known state, wake dormant SWD, issue TARGETSEL,
-    // then read DPIDR from the selected DP.
-    // for (int i = 0; i < 7; i++) {
-    //    swd_phy_write_bits(8u, 0xffu);
-    // }
-
-    // JTAG-to-dormant select, 39 bits, LSB-first 0x33bbbbba.
-    // swd_phy_write_bits(32u, 0x33bbbbbau);
-    // swd_phy_write_bits(7u,  0x00u);
-
-    // send_byte_stream(s_dormant_to_swd, (uint32_t)sizeof(s_dormant_to_swd));
-
-    // for (int i = 0; i < 7; i++) {
-    //    swd_phy_write_bits(8u, 0xffu);
-    // }
-
-    // targetsel_write(targetsel);
     return swd_dp_read_dpidr(out_dpidr);
 }

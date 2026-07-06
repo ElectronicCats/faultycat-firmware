@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "board_v2.h"
+#include "i2c_core.h"
 #include "jtag_core.h"
 #include "swd_bus_lock.h"
 #include "swd_dp.h"
@@ -252,4 +253,77 @@ pinout_scan_swd_status_t pinout_scan_swd(pinout_scan_swd_result_t* out,
     }
     swd_bus_release(SWD_BUS_OWNER_SCANNER);
     return found ? PINOUT_SCAN_SWD_MATCH : PINOUT_SCAN_SWD_NO_MATCH;
+}
+
+// -----------------------------------------------------------------------------
+// I2C scan
+//
+// Same false-positive guard rationale as JTAG/SWD above (F8-6): the
+// TXS0108EPW can inject noise on the scanner header that a slave's
+// real ACK would also produce (a transient low on SDA during the ACK
+// bit window). A re-scan confirms the exact same address set repeats
+// — random noise rarely ACKs the same addresses twice in a row.
+// -----------------------------------------------------------------------------
+
+static bool i2c_addr_sets_match(const uint8_t* a, size_t a_count, const uint8_t* b,
+                                size_t b_count) {
+    if (a_count != b_count)
+        return false;
+    return memcmp(a, b, a_count) == 0;
+}
+
+pinout_scan_i2c_status_t pinout_scan_i2c(pinout_scan_i2c_result_t* out,
+                                         pinout_scanner_progress_cb cb) {
+    if (out == NULL)
+        return PINOUT_SCAN_I2C_NO_MATCH;
+    // Service-layer bus mutex (services/swd_bus_lock) — held for the
+    // whole sweep, same contract as pinout_scan_swd above.
+    if (!swd_bus_try_acquire(SWD_BUS_OWNER_I2C_SCANNER))
+        return PINOUT_SCAN_I2C_BUS_BUSY;
+
+    memset(out, 0, sizeof(*out));
+
+    pinout_perm_iter_t it;
+    pinout_perm_init(&it, PINOUT_SCANNER_I2C_PINS, PINOUT_SCANNER_CHANNELS);
+
+    bool found   = false;
+    uint32_t cur = 0u;
+    while (pinout_perm_next(&it)) {
+        if (cb != NULL)
+            cb(cur, PINOUT_SCANNER_I2C_TOTAL);
+        cur++;
+
+        uint8_t sda = s_ch_to_gpio[it.indices[0]];
+        uint8_t scl = s_ch_to_gpio[it.indices[1]];
+        if (!i2c_init(sda, scl, 100))
+            continue;
+
+        uint8_t addrs[PINOUT_SCANNER_I2C_MAX_ADDRS];
+        size_t n = i2c_bus_scan(addrs, PINOUT_SCANNER_I2C_MAX_ADDRS);
+        if (n >= 1u) {
+            // Stability check — N more scans must all return the
+            // exact same address set.
+            bool stable = true;
+            for (uint8_t r = 0; r < PINOUT_SCAN_CONFIRM_READS; r++) {
+                uint8_t reread[PINOUT_SCANNER_I2C_MAX_ADDRS];
+                size_t nr = i2c_bus_scan(reread, PINOUT_SCANNER_I2C_MAX_ADDRS);
+                if (!i2c_addr_sets_match(addrs, n, reread, nr)) {
+                    stable = false;
+                    break;
+                }
+            }
+            if (stable) {
+                out->sda        = sda;
+                out->scl        = scl;
+                out->addr_count = n;
+                memcpy(out->addrs, addrs, n);
+                i2c_deinit();
+                found = true;
+                break;
+            }
+        }
+        i2c_deinit();
+    }
+    swd_bus_release(SWD_BUS_OWNER_I2C_SCANNER);
+    return found ? PINOUT_SCAN_I2C_MATCH : PINOUT_SCAN_I2C_NO_MATCH;
 }

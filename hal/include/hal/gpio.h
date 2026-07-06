@@ -40,3 +40,9 @@ bool hal_gpio_get(hal_gpio_pin_t pin);
 //   both false                         — floating
 //   both true                          — platform-defined (RP2040: keeper)
 void hal_gpio_set_pulls(hal_gpio_pin_t pin, bool pull_up, bool pull_down);
+
+// Raw pointer to the SIO GPIO_IN register (all pins packed in the low
+// bits — GP0..GP29 on RP2040). Opaque to callers; for DMA sources only,
+// pass into hal_dma_configure as `src`. Never read this directly outside
+// a DMA-configured transfer — use hal_gpio_get() for single-pin reads.
+const volatile void* hal_gpio_in_register(void);

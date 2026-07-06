@@ -121,6 +121,18 @@ void hal_pio_sm_set_clkdiv_int(hal_pio_inst_t* pio, uint32_t sm, uint32_t divide
     pio_sm_set_clkdiv_int_frac(as_pio(pio), (uint)sm, (uint16_t)divider, 0);
 }
 
+const volatile void* hal_pio_sm_rxfifo_register(hal_pio_inst_t* pio, uint32_t sm) {
+    if (!pio || sm > 3)
+        return NULL;
+    return &as_pio(pio)->rxf[sm];
+}
+
+uint8_t hal_pio_sm_rx_dreq(hal_pio_inst_t* pio, uint32_t sm) {
+    if (!pio || sm > 3)
+        return 0u;
+    return (uint8_t)pio_get_dreq(as_pio(pio), (uint)sm, false);
+}
+
 void hal_pio_sm_set_enabled(hal_pio_inst_t* pio, uint32_t sm, bool en) {
     if (!pio || sm > 3)
         return;

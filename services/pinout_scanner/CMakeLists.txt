@@ -14,4 +14,5 @@ target_link_libraries(service_pinout_scanner
         service_jtag
         service_swd
         service_swd_bus_lock
+        service_i2c
 )

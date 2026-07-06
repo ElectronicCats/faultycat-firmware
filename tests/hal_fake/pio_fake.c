@@ -194,6 +194,24 @@ void hal_pio_set_consecutive_pindirs(hal_pio_inst_t* pio, uint32_t sm, uint32_t 
     smst->last_pindirs_is_out = is_out;
 }
 
+const volatile void* hal_pio_sm_rxfifo_register(hal_pio_inst_t* pio, uint32_t sm) {
+    if (!pio || sm >= HAL_FAKE_PIO_SM_PER_INST)
+        return NULL;
+    // Fake-only sentinel address: the SM's own rx_fifo storage, stable
+    // for the lifetime of the fake and unique per (pio, sm).
+    return &as_state(pio)->sm[sm].rx_fifo[0];
+}
+
+uint8_t hal_pio_sm_rx_dreq(hal_pio_inst_t* pio, uint32_t sm) {
+    if (!pio || sm >= HAL_FAKE_PIO_SM_PER_INST)
+        return 0u;
+    // Fake-only sentinel: doesn't need to match real pico-sdk DREQ
+    // numbers, only to be deterministic and distinct per (pio, sm) so
+    // tests can assert the DMA config picked it up.
+    uint8_t which = (uint8_t)((as_state(pio) - hal_fake_pio_insts));
+    return (uint8_t)(100u + which * 10u + sm);
+}
+
 // Test-only hooks
 void hal_fake_pio_push_rx(uint8_t which, uint32_t sm, uint32_t word) {
     if (which >= HAL_FAKE_PIO_INSTANCES || sm >= HAL_FAKE_PIO_SM_PER_INST)

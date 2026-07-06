@@ -17,9 +17,10 @@ technique × mode matrix is described in [`GLITCHING.md`](GLITCHING.md).
 > direct-SWD WIP cut" callout in the next section for the exact
 > gate and how it is implemented.
 
-See [`FAULTYCAT_REFACTOR_PLAN.md`](../FAULTYCAT_REFACTOR_PLAN.md) for
-the full phased roadmap (F0 → F11) and the 16 frozen design decisions.
-This document describes the **layering and data flow**, not the plan.
+The phased roadmap (F0 → F12) is tracked in the "Status snapshot"
+table below; the original planning document with the frozen design
+decisions is no longer part of this repo. This document describes
+the **layering and data flow**, not the plan.
 
 ## Status snapshot (as of v3.0-f10)
 
@@ -60,11 +61,11 @@ layer). 404 firmware Unity tests remain green.
 | F8 — JTAG core + pinout scanner + BusPirate + serprog (blueTag) | `v3.0-f8` | ✓ closed — F8-1 `services/jtag_core/` (CPU bit-bang TAP + IDCODE chain). F8-2 `services/pinout_scanner/` (P(8,4) / P(8,2) brute-force scan + first-match). F8-3 unified CDC2 shell dispatcher. F8-4 `services/buspirate_compat/` (streaming BPv1 BBIO + OOCD JTAG sub-mode). F8-5 `services/flashrom_serprog/` (streaming serprog v1 + 4-pin CPU SPI bit-bang). F8-6 polish: 3-read consistency check on `pinout_scan_jtag`/`_swd` rejects bus-noise false positives empirically observed when a non-JTAG device is wired to the scanner header; `pump_shell_cdc` breaks out on mode-switch so the trailing `\n` of `\r\n` doesn't bleed into the new binary parser; new `docs/JTAG_INTERNALS.md`. Disconnect detection in main loop fires `bp_on_exit_cb` / `sp_on_exit_cb` if the host drops DTR mid-session. Diag snapshot gagged while in binary modes. Physical smoke 2026-04-28 on v2.2 board: 13/13 checks green (golden + regression). |
 | F9 — Campaign manager + SWD mutex | `v3.0-f9` | ✓ closed — F9-1 `services/swd_bus_lock/` (volatile-flag cooperative mutex over the scanner-header SWD bus, 4 owner tags IDLE/CAMPAIGN/SCANNER/DAPLINK, single-owner no-reentrance; 13 host tests). F9-2 `services/campaign_manager/` (6-state machine over cartesian sweep + 256-entry × 28 B result ringbuffer + pluggable step executor with no-op default; 27 host tests). F9-3 engine adapters in `apps/faultycat_fw/main.c` — `campaign_executor_emfi/_crowbar` blocking-with-cooperative-yield; verify hook acquires/releases swd_bus_lock around a no-op call (F-future plugs real SWD post-fire verify). Shell `campaign <subcmd>` for status/stop/drain/`demo crowbar` smoke. F9-4 `services/host_proto/campaign_proto/` — CRC16-CCITT framing extending emfi_proto / crowbar_proto with CAMPAIGN_CONFIG/START/STOP/STATUS/DRAIN opcodes; engine implied by CDC; 17 host tests. F9-5 reference host client mirroring the EMFI/crowbar clients. F9-6 polish: bumped CROWBAR_PROTO_MAX_PAYLOAD from 64 → 512 (DRAIN replies were silently dropped); made pump_emfi/crowbar_cdc reply[768] static (defensive vs stack overflow in deep executor wait loops). Smoke 2026-04-28: `campaign demo crowbar` shell + reference client `configure → start → watch` both stream complete sweeps end-to-end on v2.2. |
 | F10 — Host tool (now a separate repository) | `v3.0-f10` | ✓ closed 2026-04-29 — the host CLI/TUI package was developed against the F4/F5/F9 wire protocols (framing, USB CDC enumeration, emfi/crowbar/campaign/scanner protocol clients). The wire protocols themselves (host_proto/* opcodes, frame format, mutex contract) are unchanged. The host tool now lives in a separate repository; see that repository for its own architecture and release docs. |
-| F11 — Hardening, docs, release `v3.0.0` | — | in progress — **scope expanded 2026-04-29** to include F11-0 (host-tool control-surface work, tracked in the host tool's own repository) before F11-1..F11-7 docs/benchmarks/release polish on the firmware side. F11-0d's scope included reducing the SWD scan surface to a single-button MVP on 2026-05-19 as part of the JTAG/direct-SWD WIP cut described below — the firmware-side dispatcher gating is unaffected by where the host tool lives. |
+| F11 — Hardening, docs, release `v3.0.0` | — | in progress — **scope expanded 2026-04-29** to include F11-0 (host-tool control-surface work, tracked in the host tool's own repository) before F11-1..F11-7 docs/benchmarks/release polish on the firmware side. F11-0d's scope included reducing the SWD scan surface to a single-button MVP on 2026-05-19 as part of the JTAG/direct-SWD WIP cut described below — the firmware-side dispatcher gating is unaffected by where the host tool lives. **2026-06-24**: `services/i2c_core/i2c_la.c` — passive I2C logic analyzer (DMA-timer-paced ring over `SIO->GPIO_IN[7:0]`, no PIO — see the `pio1` SM 2 postmortem below), exposed two ways on CDC2: the existing text shell (`i2c la <sda> <scl> <us> <n>`, hexdump + host-side `--decode`/`--vcd`) and `services/sump_ols/` — a SUMP/OLS protocol subset (`i2c la sump enter <sda> <scl>` mode-switch, same shape as F8-4/F8-5) so PulseView/sigrok's stock "ols" driver can drive a live capture with no bespoke client. SUMP shares CDC2 rather than getting a dedicated CDC because the RP2040 is already at 16/16 USB endpoints (see "USB composite" below) — accepted UX tradeoff: the operator arms SUMP mode and must open PulseView/sigrok-cli on the same port before anything drops DTR, or the firmware reverts to the text shell (same DTR-drop dependency as F8-4/F8-5). 10/10 host tests (`tests/test_sump_ols.c`), protocol values confirmed against live sigrok sources rather than the datasheet. **2026-07-01**: generalized the I2C-specific sampler into a protocol-agnostic logic analyzer — `services/i2c_core/i2c_la.{c,h}` moved (`git mv`) to `services/logic_analyzer/logic_analyzer.{c,h}`, symbols `i2c_la_*`→`la_*`, `la_init()` now takes no pins and always captures the GP0..GP7 bank, device name `"FaultyCat LA"`. The four protocol-named shell commands (`i2c la`, `i2c la sump enter`, `uart la`, `uart la sump enter`) collapsed into one generic pair: `la <us> <n> [bin]` (raw hexdump) and `la sump enter` (SUMP/OLS). Protocol decode is entirely host-side in PulseView — the firmware is a raw N-channel sampler; adding SPI/UART/GPIO support is a documented pin mapping, not firmware work. See `docs/LOGIC_ANALYZER.md`. |
 | F12 — GUI Web local (v3.1.0) | — | post `v3.0.0`. New phase added 2026-04-29, scoped entirely to the host tool (now a separate repository) — no firmware-side changes. |
 
 Current tree health:
-- **9 drivers** implemented (8 active + `voltage_mux` stub) under `drivers/`.
+- **8 drivers** implemented under `drivers/`.
 - **USB composite** up on VID:PID `1209:fa17`. 10 interfaces
   (4×CDC + Vendor + HID). 16/16 endpoints used (hard RP2040 limit).
   `bcdUSB=0x0210` + BOS + MS OS 2.0 descriptors for Windows WinUSB
@@ -262,7 +263,7 @@ Current tree health:
   is the only way out if the operator's terminal closes uncleanly). A
   second passthrough pair (GP range still to be decided) is explicitly
   out of scope for this pass. **Verified against real hardware**: an
-  STM32F429-Disc1 driving UART2 (PA2 TX / PA3 RX) through a
+  STM32F429-Disc1 driving UART2 (PA9 TX / PA10 RX) through a
   TXS0108EPW level shifter into scanner header CH0/CH1 round-trips
   cleanly in both `faultycmd uart enable` and `faultycmd uart console`
   modes. The earlier debug-only UART1/GP4 mirror tap used while
@@ -314,10 +315,15 @@ SWCLK/SWDIO pins). F8-1 deliberately keeps `services/jtag_core` on
 **CPU bit-bang via `hal/gpio`**, NOT PIO — the TXS0108EPW level
 shifter on the scanner header caps wire rate at ~25 MHz anyway and
 matching blueTag's proven pure-CPU path keeps F8-1 testable host-
-side without a PIO simulator. `pio1` SM 1..3 stay reserved for
-`target-uart` (F8) and the eventual buspirate-compat SPI bit-banger
-(F8-4 if we want hardware-rate flashrom), splitting across those
-consumers.
+side without a PIO simulator. `pio1` SM 2 is claimed by
+`services/logic_analyzer` (2-instruction GPIO snapshot loop — DMA
+cannot read `SIO->GPIO_IN` on RP2040, so the logic-analyzer sampler
+moved to PIO instead of the originally planned DMA-timer/SIO
+design). `pio1` SM
+1 and SM 3 stay reserved for `target-uart` (F8) and the eventual
+buspirate-compat SPI bit-banger (F8-4 if we want hardware-rate
+flashrom); the logic analyzer's 2-instruction program leaves the bulk
+of pio1's 32-slot instruction memory free for them.
 
 **HAL extension (F6-2):** `hal/include/hal/pio.h` gained
 `out_pin_base/count`, `wrap_target/end` (relative to program start),
@@ -363,7 +369,6 @@ compatible — existing EMFI / crowbar configures are unaffected.
 │    scanner_io     (GP0..GP7, 8 channels)                        ✓ F2a        │
 │    ext_trigger    (GP8 + pull config)                           ✓ F2a        │
 │    crowbar_mosfet (GP17 LP / GP16 HP + break-before-make)       ✓ F2b        │
-│    voltage_mux    (stub — no HW mux on v2.x)                    ✓ F2b        │
 │    hv_charger     (GP20 PWM flyback + GP18 CHARGED, 60s auto)   ✓ F2b SIGNED │
 │    emfi_pulse     (GP14 HV pulse, CPU-timed manual)             ✓ F2b SIGNED │
 ├────────────────────────────────────────────────────────────────────────────┤
@@ -482,7 +487,8 @@ side of the wire protocol.
 
 ## What each phase delivers
 
-See [`FAULTYCAT_REFACTOR_PLAN.md §6`](../FAULTYCAT_REFACTOR_PLAN.md#6-plan-por-fases-superpowers).
+See the "Status snapshot" table near the top of this document — it
+lists what each phase (F0 → F12) delivered and its current status.
 
 ## Update policy for this document
 

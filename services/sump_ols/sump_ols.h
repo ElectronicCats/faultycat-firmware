@@ -1,0 +1,171 @@
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+// services/sump_ols — SUMP/OLS ("Openbench Logic Sniffer") protocol,
+// streaming flavour, layered on top of services/logic_analyzer/logic_analyzer.c.
+//
+// Why this exists: PulseView/sigrok ship the "ols" driver out of the
+// box, which speaks the classic SUMP serial protocol with no
+// configuration needed beyond picking a serial port — see
+// docs/I2C_LA_DMA_TIMER_PLAN.md §6. Implementing this subset lets
+// PulseView drive `logic_analyzer` directly instead of needing a bespoke
+// sigrok driver or Python client.
+//
+// Mode-switch shape is identical to buspirate_compat / flashrom_serprog
+// (apps/faultycat_fw/main.c): a text command on the CDC2 shell
+// (`la sump enter`) calls la_init() and flips
+// SHELL_MODE_SUMP; every subsequent byte is fed here instead of the
+// line parser. Leaving the mode is host-initiated via an explicit
+// escape byte (CMD_FORCE_EXIT, mirrors buspirate_compat's own
+// BP_CMD_USER_TERM 0x0F convention) rather than DTR-drop detection —
+// see sump_ols.c. This used to depend on the host dropping DTR, which
+// Windows' CDC-ACM driver does unconditionally on close regardless of
+// what the session actually needed (see
+// faultycat-TUI/docs/WINDOWS_SUMP_DTR_ISSUE.md for the history); the
+// explicit byte works identically on every host OS since it's just
+// wire data, not a pin state.
+//
+// Protocol values below were confirmed against the live sigrok
+// `libsigrok/src/hardware/openbench-logic-sniffer/{protocol.h,
+// protocol.c,api.c}` sources (CLOCK_RATE = 100 MHz, ID reply "1ALS",
+// metadata token bytes, little-endian long-command arguments,
+// CMD_CAPTURE_SIZE's readcount/4 packing) rather than guessed from the
+// datasheet — getting any of these wrong fails PulseView's scan
+// silently (no error, just "device not found" or garbled samples).
+//
+// Scope: enough of SUMP to let PulseView scan the device and run a
+// capture with an optional stage-0 level trigger — the subset
+// enumerated in I2C_LA_DMA_TIMER_PLAN.md §6 plus basic triggering (see
+// docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md). ARM's sample dump goes
+// out in reverse chronological order (newest first) — the SUMP
+// convention sigrok's ols driver un-reverses on receive; sending
+// oldest-first renders every capture time-mirrored in PulseView.
+// CAPTURE_SIZE's delaycount is honored: sigrok derives it from
+// PulseView's "pre-trigger capture ratio", and the pre-trigger portion
+// of the window is served from ring history — without it a capture
+// starts dead on the trigger sample and (e.g.) a UART decoder never
+// sees the idle line before the first start bit, misframing the burst.
+// Stage-0 trigger
+// mask/value (CMD_SET_TRIGGER_MASK/VALUE, 0xC0/0xC1) are parsed and
+// used to delay the capture start until the first matching sample;
+// stage-0 config (0xC2) and every higher stage (0xC4..0xCE) are still
+// accepted-and-ignored (bytes consumed so the stream stays in sync).
+// With no trigger configured PulseView sends no SET_TRIGGER_* at all,
+// so trigger_mask stays 0 (match-anything) and ARM starts immediately,
+// exactly as before.
+
+typedef struct {
+    void (*write_byte)(uint8_t b, void* user);
+    void (*yield)(void* user);   // called periodically while streaming
+                                 // ARM's capture data, to keep tud_task
+                                 // / other CDC pumps alive.
+    void (*on_exit)(void* user); // Fired by CMD_FORCE_EXIT (0x0F) —
+                                 // the host's explicit request to
+                                 // leave SUMP mode. See sump_ols.c.
+    void* user;
+} sump_ols_callbacks_t;
+
+void sump_ols_init(const sump_ols_callbacks_t* cb);
+void sump_ols_feed_byte(uint8_t b);
+
+// Mirrors flashrom_serprog_get_state()/buspirate_compat — exposed for
+// tests and for main.c's disconnect handler to decide whether a
+// capture needs aborting.
+typedef enum {
+    SUMP_OLS_IDLE               = 0,
+    SUMP_OLS_SET_DIVIDER_B0     = 1,
+    SUMP_OLS_SET_DIVIDER_B1     = 2,
+    SUMP_OLS_SET_DIVIDER_B2     = 3,
+    SUMP_OLS_SET_DIVIDER_B3     = 4,
+    SUMP_OLS_CAPTURE_SIZE_B0    = 5,
+    SUMP_OLS_CAPTURE_SIZE_B1    = 6,
+    SUMP_OLS_CAPTURE_SIZE_B2    = 7,
+    SUMP_OLS_CAPTURE_SIZE_B3    = 8,
+    SUMP_OLS_SWALLOW_LONG_ARG_1 = 9,  // generic 4-byte-argument sink for
+    SUMP_OLS_SWALLOW_LONG_ARG_2 = 10, // long commands we accept but
+    SUMP_OLS_SWALLOW_LONG_ARG_3 = 11, // ignore (SET_FLAGS, stage-0
+    SUMP_OLS_SWALLOW_LONG_ARG_4 = 12, // trigger config, higher stages).
+
+    // Stage-0 basic trigger mask/value (CMD_SET_TRIGGER_MASK 0xC0 /
+    // CMD_SET_TRIGGER_VALUE 0xC1), 4-byte little-endian argument like
+    // SET_DIVIDER — only the low byte is kept (channels 0-7).
+    SUMP_OLS_TRIGGER_MASK0_B0  = 13,
+    SUMP_OLS_TRIGGER_MASK0_B1  = 14,
+    SUMP_OLS_TRIGGER_MASK0_B2  = 15,
+    SUMP_OLS_TRIGGER_MASK0_B3  = 16,
+    SUMP_OLS_TRIGGER_VALUE0_B0 = 17,
+    SUMP_OLS_TRIGGER_VALUE0_B1 = 18,
+    SUMP_OLS_TRIGGER_VALUE0_B2 = 19,
+    SUMP_OLS_TRIGGER_VALUE0_B3 = 20,
+} sump_ols_state_t;
+
+sump_ols_state_t sump_ols_get_state(void);
+
+// True iff an ARM-triggered capture is currently streaming (i.e. a
+// sump_ols_feed_byte(CMD_ARM_BASIC_TRIGGER) call hasn't returned yet).
+// Always false from outside feed_byte itself — capture runs to
+// completion synchronously inside the ARM call, same as cmd_la.
+// Exposed for tests only.
+bool sump_ols_is_capturing(void);
+
+// Stage-0 trigger mask/value last parsed from CMD_SET_TRIGGER_MASK/VALUE
+// (low byte only — channels 0-7). mask == 0 means "match anything", the
+// zero-initialized default that makes ARM start immediately. Exposed for
+// tests only.
+uint8_t sump_ols_trigger_mask(void);
+uint8_t sump_ols_trigger_value(void);
+
+// ID reply sent for CMD_ID (0x02) — the literal 4 bytes the sigrok
+// `ols` driver's scan() matches with strncmp(buf, "1ALS", 4) (it also
+// accepts "1SLO" — the same bytes byte-swapped — but "1ALS" is the
+// canonical OLS reply and what real boards send).
+#define SUMP_OLS_ID_REPLY "1ALS"
+
+// Device name reported in metadata token 0x01 (DEVICE_NAME, ASCII +
+// NUL). Exposed for tests/docs.
+#define SUMP_OLS_DEVICE_NAME "FaultyCat LA"
+
+// Maximum samples per capture, reported in CMD_METADATA
+// SAMPLE_MEMORY_BYTES so PulseView never requests more. Half the ring
+// (LA_CAPTURE_BUFFER_BYTES / 2 — asserted in sump_ols.c): do_arm()
+// captures losslessly by letting the DMA fill the ring until the n
+// post-trigger samples are in, then STOPPING it before streaming
+// (capture-then-dump), so n must fit in the ring with headroom for the
+// samples the DMA keeps writing between the "n reached" poll and
+// la_stop(). Half the ring leaves 16384 samples (16 ms at the fastest
+// 1 us/sample rate) of that slack — orders of magnitude above the
+// poll loop's yield latency.
+//
+// This deliberately trades away the old unbounded streaming mode: at
+// realistic sample rates USB FS CDC can't drain the ring as fast as
+// the DMA fills it, so streaming silently dropped ring-laps' worth of
+// samples mid-capture — exactly the gaps that broke protocol decode in
+// PulseView. Bounded-but-lossless wins for a protocol analyzer; the
+// `la <us> <n> bin` shell command still offers best-effort unbounded
+// streaming for raw captures.
+#define SUMP_OLS_MAX_SAMPLES 16384u
+
+// Minimum pre-trigger history (samples) for any capture with a real
+// trigger configured, even when the host asks for none: PulseView's
+// pre-trigger capture ratio defaults to 0%, and a window that starts
+// dead on the trigger sample gives serial decoders nothing to sync on
+// (a UART start bit with no preceding idle-high has no falling edge),
+// misframing the whole first burst. 32 samples ≈ 3-4 bit times at the
+// 1 MHz / 115200-baud sweet spot. Capped at n/8 so tiny captures keep
+// their post-trigger samples; a larger host-requested ratio wins. The
+// window shifts back by the same amount — SUMP hosts tolerate that (the
+// sample count is unchanged; only the ratio-0 trigger marker drifts).
+#define SUMP_OLS_PRETRIGGER_MIN 32u
+
+// Fallback sample interval (microseconds) used by CMD_ARM if the host
+// never sent CMD_SET_DIVIDER first — shouldn't happen in practice
+// (sigrok's ols_prepare_acquisition always sends it), but keeps ARM
+// well-defined regardless of call order.
+#define SUMP_OLS_DEFAULT_INTERVAL_US 2u
+
+// Fallback total sample count for CMD_ARM if the host never sent
+// CMD_CAPTURE_SIZE — see SUMP_OLS_DEFAULT_INTERVAL_US.
+#define SUMP_OLS_DEFAULT_N_SAMPLES 2048u

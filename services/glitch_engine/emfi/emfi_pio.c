@@ -3,21 +3,7 @@
 #include "board_v2.h"
 #include "emfi_pulse.h"
 #include "hal/pio.h"
-
-// ---------------------------------------------------------------------------
-// PIO instruction encodings (RP2040 datasheet §3.4)
-// ---------------------------------------------------------------------------
-
-#define OP_PULL_BLOCK   0x80A0u
-#define OP_OUT_Y_32     0x6040u
-#define OP_WAIT_0_PIN0  0x2020u
-#define OP_WAIT_1_PIN0  0x20A0u
-#define OP_SET_PIN_HIGH 0xE001u
-#define OP_SET_PIN_LOW  0xE000u
-#define OP_IRQ0         0xC000u
-static inline uint16_t op_jmp_y_dec(uint8_t addr) {
-    return (uint16_t)(0x0080u | (addr & 0x1Fu));
-}
+#include "pio_glitch_prog.h"
 
 // ---------------------------------------------------------------------------
 // Clock — 125 MHz / 1.0 = 125 MHz PIO clock. 1 instr = 8 ns nominal,
@@ -26,20 +12,9 @@ static inline uint16_t op_jmp_y_dec(uint8_t addr) {
 #define EMFI_PIO_CLK_DIV      1.0f
 #define EMFI_PIO_TICKS_PER_US 125u
 
-// ---------------------------------------------------------------------------
-// Program layout (up to 13 instructions, always <= 32).
-//
-// [0]    PULL block                  ; pull delay_ticks into OSR
-// [1]    OUT Y, 32                   ; Y = delay_ticks
-// [2..N] trigger block (0..3 instrs) ; compiled from EMFI_TRIG_*
-// [N+1]  JMP Y-- self                ; delay loop
-// [N+2]  PULL block                  ; pull pulse_width_ticks
-// [N+3]  OUT Y, 32                   ; Y = pulse_width_ticks
-// [N+4]  SET pins=1                  ; rising edge of pulse
-// [N+5]  JMP Y-- self                ; hold high
-// [N+6]  SET pins=0                  ; falling edge
-// [N+7]  IRQ 0                       ; signal GLITCHED to CPU
-// ---------------------------------------------------------------------------
+// Program layout: the shared delay/trigger/pulse/IRQ compiler in
+// pio_glitch_prog.h, with no leading pindir setup and IRQ 0 (crowbar
+// uses IRQ 1 — see that engine's pio_glitch_build_program call).
 
 static uint16_t s_prog[24];
 static uint32_t s_prog_len;
@@ -52,49 +27,8 @@ static bool s_loaded         = false;
 static uint32_t s_delay_ticks;
 static uint32_t s_width_ticks;
 
-static uint32_t compile_trigger_block(uint16_t* out, emfi_trig_t t) {
-    switch (t) {
-        case EMFI_TRIG_IMMEDIATE:
-            return 0;
-        case EMFI_TRIG_EXT_RISING:
-            out[0] = OP_WAIT_0_PIN0;
-            out[1] = OP_WAIT_1_PIN0;
-            return 2;
-        case EMFI_TRIG_EXT_FALLING:
-            out[0] = OP_WAIT_1_PIN0;
-            out[1] = OP_WAIT_0_PIN0;
-            return 2;
-        case EMFI_TRIG_EXT_PULSE_POS:
-            out[0] = OP_WAIT_0_PIN0;
-            out[1] = OP_WAIT_1_PIN0;
-            out[2] = OP_WAIT_0_PIN0;
-            return 3;
-        case EMFI_TRIG_EXT_PULSE_NEG:
-            // Inverse of PULSE_POS: HIGH-idle, source dips LOW and
-            // comes back HIGH. Trailing rising edge is the trigger
-            // event. See emfi_pio.h doc-comment on emfi_trig_t.
-            out[0] = OP_WAIT_1_PIN0;
-            out[1] = OP_WAIT_0_PIN0;
-            out[2] = OP_WAIT_1_PIN0;
-            return 3;
-    }
-    return 0;
-}
-
 static void build_program(const emfi_pio_params_t* p) {
-    s_prog_len           = 0;
-    s_prog[s_prog_len++] = OP_PULL_BLOCK;
-    s_prog[s_prog_len++] = OP_OUT_Y_32;
-    s_prog_len += compile_trigger_block(&s_prog[s_prog_len], p->trigger);
-    uint8_t delay_loop_addr = (uint8_t)s_prog_len;
-    s_prog[s_prog_len++]    = op_jmp_y_dec(delay_loop_addr);
-    s_prog[s_prog_len++]    = OP_PULL_BLOCK;
-    s_prog[s_prog_len++]    = OP_OUT_Y_32;
-    s_prog[s_prog_len++]    = OP_SET_PIN_HIGH;
-    uint8_t hold_loop_addr  = (uint8_t)s_prog_len;
-    s_prog[s_prog_len++]    = op_jmp_y_dec(hold_loop_addr);
-    s_prog[s_prog_len++]    = OP_SET_PIN_LOW;
-    s_prog[s_prog_len++]    = OP_IRQ0;
+    s_prog_len = pio_glitch_build_program(s_prog, p->trigger, PIO_OP_IRQ(0), false);
 }
 
 bool emfi_pio_init(void) {

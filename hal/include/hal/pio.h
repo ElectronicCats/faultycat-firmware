@@ -103,3 +103,13 @@ void hal_pio_sm_exec(hal_pio_inst_t* pio, uint32_t sm, uint16_t instruction);
 // divider stays 0. Used by swd_phy_set_clk_khz to retune SWCLK
 // without a full deinit/init cycle.
 void hal_pio_sm_set_clkdiv_int(hal_pio_inst_t* pio, uint32_t sm, uint32_t divider);
+
+// Address of the SM's RX FIFO register — a valid DMA source (unlike
+// SIO->GPIO_IN, the PIO RX FIFO sits on the bus fabric the DMA bus
+// master can reach). Added for services/i2c_core/i2c_la.c.
+const volatile void* hal_pio_sm_rxfifo_register(hal_pio_inst_t* pio, uint32_t sm);
+
+// DREQ number for the SM's RX FIFO, to plug into hal_dma_cfg_t.dreq
+// (caller casts to hal_dma_dreq_t — kept as a plain uint8_t here so
+// this header doesn't need to depend on hal/dma.h).
+uint8_t hal_pio_sm_rx_dreq(hal_pio_inst_t* pio, uint32_t sm);

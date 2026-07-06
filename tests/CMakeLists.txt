@@ -49,6 +49,7 @@ function(faultycat_add_service_emfi_test name)
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/emfi/emfi_campaign.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/emfi_proto/emfi_proto.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto/campaign_proto.c
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto/frame_proto.c
         ${CMAKE_SOURCE_DIR}/services/campaign_manager/campaign_manager.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake firmware_version)
@@ -57,9 +58,11 @@ function(faultycat_add_service_emfi_test name)
         ${CMAKE_SOURCE_DIR}/drivers/emfi_pulse
         ${CMAKE_SOURCE_DIR}/drivers/hv_charger
         ${CMAKE_SOURCE_DIR}/drivers/ext_trigger
+        ${CMAKE_SOURCE_DIR}/services/glitch_engine
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/emfi
         ${CMAKE_SOURCE_DIR}/services/host_proto/emfi_proto
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto
         ${CMAKE_SOURCE_DIR}/services/campaign_manager
     )
     add_test(NAME ${name} COMMAND ${name})
@@ -107,6 +110,7 @@ function(faultycat_add_service_crowbar_test name)
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/crowbar/crowbar_campaign.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/crowbar_proto/crowbar_proto.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto/campaign_proto.c
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto/frame_proto.c
         ${CMAKE_SOURCE_DIR}/services/campaign_manager/campaign_manager.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake firmware_version)
@@ -114,9 +118,11 @@ function(faultycat_add_service_crowbar_test name)
         ${CMAKE_SOURCE_DIR}/drivers/include
         ${CMAKE_SOURCE_DIR}/drivers/crowbar_mosfet
         ${CMAKE_SOURCE_DIR}/drivers/ext_trigger
+        ${CMAKE_SOURCE_DIR}/services/glitch_engine
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/crowbar
         ${CMAKE_SOURCE_DIR}/services/host_proto/crowbar_proto
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto
         ${CMAKE_SOURCE_DIR}/services/campaign_manager
     )
     add_test(NAME ${name} COMMAND ${name})
@@ -181,6 +187,7 @@ function(faultycat_add_service_pinout_test name)
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_dp.c
         ${CMAKE_SOURCE_DIR}/services/swd_core/swd_mem.c
         ${CMAKE_SOURCE_DIR}/services/swd_bus_lock/swd_bus_lock.c
+        ${CMAKE_SOURCE_DIR}/services/i2c_core/i2c_core.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake)
     target_include_directories(${name} PRIVATE
@@ -189,6 +196,7 @@ function(faultycat_add_service_pinout_test name)
         ${CMAKE_SOURCE_DIR}/services/jtag_core
         ${CMAKE_SOURCE_DIR}/services/swd_core
         ${CMAKE_SOURCE_DIR}/services/swd_bus_lock
+        ${CMAKE_SOURCE_DIR}/services/i2c_core
     )
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
@@ -244,6 +252,44 @@ endfunction()
 
 faultycat_add_service_swd_bus_lock_test(test_swd_bus_lock)
 
+# Logic analyzer — passive, protocol-agnostic sampler (see
+# docs/LOGIC_ANALYZER.md). Links logic_analyzer.c only — independent
+# lifecycle, raw GP0..GP7 capture with host-side decode.
+function(faultycat_add_service_logic_analyzer_test name)
+    add_executable(${name}
+        ${name}.c
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer/logic_analyzer.c
+    )
+    target_link_libraries(${name} PRIVATE unity hal_fake)
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/drivers/include
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer
+    )
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+faultycat_add_service_logic_analyzer_test(test_logic_analyzer)
+
+# SUMP/OLS — PulseView/sigrok protocol subset over logic_analyzer (see
+# docs/I2C_LA_DMA_TIMER_PLAN.md §6). Links logic_analyzer.c too since
+# sump_ols.c calls into it directly (init/start/stop/total/buffer).
+function(faultycat_add_service_sump_ols_test name)
+    add_executable(${name}
+        ${name}.c
+        ${CMAKE_SOURCE_DIR}/services/sump_ols/sump_ols.c
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer/logic_analyzer.c
+    )
+    target_link_libraries(${name} PRIVATE unity hal_fake)
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/drivers/include
+        ${CMAKE_SOURCE_DIR}/services/sump_ols
+        ${CMAKE_SOURCE_DIR}/services/logic_analyzer
+    )
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+faultycat_add_service_sump_ols_test(test_sump_ols)
+
 # F9-2 — campaign_manager (sweep state machine + ringbuffer)
 function(faultycat_add_service_campaign_test name)
     add_executable(${name}
@@ -285,12 +331,14 @@ function(faultycat_add_service_campaign_proto_test name)
     add_executable(${name}
         ${name}.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto/campaign_proto.c
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto/frame_proto.c
         ${CMAKE_SOURCE_DIR}/services/campaign_manager/campaign_manager.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/drivers/include
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto
         ${CMAKE_SOURCE_DIR}/services/campaign_manager
     )
     add_test(NAME ${name} COMMAND ${name})

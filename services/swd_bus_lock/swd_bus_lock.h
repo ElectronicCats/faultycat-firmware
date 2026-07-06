@@ -41,6 +41,7 @@ typedef enum {
     SWD_BUS_OWNER_DAPLINK       = 3, // CMSIS-DAP from external host (F7)
     SWD_BUS_OWNER_UART_PASSTHRU = 4, // services/uart_passthrough on CH0/CH1
     SWD_BUS_OWNER_SHELL         = 5, // apps/faultycat_fw direct-SWD debug shell
+    SWD_BUS_OWNER_I2C_SCANNER   = 6, // services/pinout_scanner I2C sweep + i2c_core probes
 } swd_bus_owner_t;
 
 // Reset to IDLE state. Safe to call repeatedly.
