@@ -1,9 +1,9 @@
 # Logic Analyzer — protocol-agnostic digital sampler
 
-**Status: current.** Supersedes the I2C-specific framing of the original
-`docs/I2C_LOGIC_ANALYZER_PLAN.md` / `docs/I2C_LA_DMA_TIMER_PLAN.md` (the
-sampling-path postmortems there still apply; only the naming and the
-"I2C-only" framing changed).
+**Status: current.** Supersedes the original I2C-specific framing (the
+sampling-path design decisions still apply; only the naming and the
+"I2C-only" framing changed — see `docs/ARCHITECTURE.md`'s `pio1` SM 2
+note for why the sampler is PIO-based rather than DMA-timer/SIO).
 
 ## What it is
 
@@ -37,9 +37,9 @@ and pick the decoder.
   `la_init()` claims PIO1/SM2 + a DMA channel and configures GP0..GP7 as
   inputs; `la_start(interval_us)` arms a continuous ring-mode DMA;
   `la_total()` / `la_buffer()` let a caller drain the sliding window. See
-  the header for the full contract and `docs/I2C_LA_DMA_TIMER_PLAN.md` for
-  why the pacing is PIO+DMA (SIO->GPIO_IN is unreachable by the DMA bus
-  master on RP2040).
+  the header for the full contract; the pacing is PIO+DMA rather than a
+  DMA-timer/SIO design because `SIO->GPIO_IN` is unreachable by the DMA
+  bus master on RP2040 (see `docs/ARCHITECTURE.md`'s `pio1` SM 2 note).
 - **`services/sump_ols/`** — a SUMP/OLS protocol subset so PulseView's
   stock `ols` driver can drive captures with no bespoke client. Reports
   `NUM_PROBES_LONG = LA_CHANNEL_COUNT` and device name `"FaultyCat LA"`.

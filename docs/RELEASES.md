@@ -22,11 +22,11 @@ firmware exposes for any host tool to consume.
 
 Releases are tagged `vA.X.Y.Z`. Four numeric segments, mandatory `v`
 prefix on the git tag. Pre-release variants append a hyphen-suffix
-(`v3.0.0.0-rc1`).
+(`v2.2.1.0-rc1`).
 
 | Segment | Bumped when… |
 |---|---|
-| A (board) | The firmware targets a different compatible hardware board/revision. Operators must confirm the UF2 matches the board in hand before flashing. |
+| A (board) | The firmware targets a different compatible hardware board/revision — currently `2` for FaultyCat HW v2.x (see `README.md`'s "Firmware for different versions"). Operators must confirm the UF2 matches the board in hand before flashing. |
 | X (major) | Incompatible wire-protocol change (PING reply shape, opcode renumbering, CDC interface re-layout). Operators must re-flash and update any host tool together. |
 | Y (minor) | New protocol command that the firmware gained; remains backwards-compatible at the *transport* level (an old host tool can still PING new firmware) but an Exact-match version gate on the host side would refuse the pairing anyway. |
 | Z (patch) | Bug fix or polish that does not add or remove protocol surface. |
@@ -52,11 +52,11 @@ top-level CMakeLists.txt then runs
 `firmware_version.h`:
 
 ```c
-#define FW_VERSION_BOARD  3u
-#define FW_VERSION_MAJOR  0u
-#define FW_VERSION_MINOR  0u
+#define FW_VERSION_BOARD  2u
+#define FW_VERSION_MAJOR  2u
+#define FW_VERSION_MINOR  1u
 #define FW_VERSION_PATCH  0u
-#define FW_VERSION_STR    "3.0.0.0"
+#define FW_VERSION_STR    "2.2.1.0"
 #define FW_VERSION_BCD    /* packed 0xBBmp for USB bcdDevice */
 ```
 
@@ -93,7 +93,7 @@ instead of treating the trailing zeros as `0.0.0.0`.
 The text shell on the scanner CDC accepts `version` and replies:
 
 ```
-SHELL: VERSION 3.0.0.0
+SHELL: VERSION 2.2.1.0
 ```
 
 This is what the `ScannerClient` probes on connect — it never sends
@@ -109,7 +109,7 @@ line:
 ```
 ========================================
 FaultyCat v3 — F8 diag (composite scanner CDC + unified shell)
-Firmware version: 3.0.0.0
+Firmware version: 2.2.1.0
 ========================================
 ```
 
@@ -175,18 +175,18 @@ non-suffix tag.
 The release is created as a draft so the maintainer reviews it, edits
 the notes if needed, and clicks publish manually.
 
-### To cut `v3.0.1.0`
+### To cut `v2.2.2.0`
 
 ```bash
 git checkout main
 # Optional: bump the literal locally for repo consistency — not
 # required, the workflow re-bumps it defensively during the build.
-sed -i -E 's/^(\s*VERSION\s+)[0-9.]+/\13.0.1.0/' CMakeLists.txt
-git commit -am "chore(release): bump to 3.0.1.0"
+sed -i -E 's/^(\s*VERSION\s+)[0-9.]+/\12.2.2.0/' CMakeLists.txt
+git commit -am "chore(release): bump to 2.2.2.0"
 
-git tag v3.0.1.0
+git tag v2.2.2.0
 git push origin main
-git push origin v3.0.1.0
+git push origin v2.2.2.0
 ```
 
 Watch the **Create Release on Tag** workflow under the Actions tab;
@@ -205,9 +205,9 @@ with each tag.
 The same script CI runs is callable from the repo root:
 
 ```bash
-./scripts/get_build.sh v3.0.1.0
+./scripts/get_build.sh v2.2.2.0
 ls build/apps/faultycat_fw/
-# faultycat_v3.0.1.0.uf2
+# faultycat_v2.2.2.0.uf2
 ```
 
 The script does the same in-place version bump CI does, so a
@@ -223,8 +223,8 @@ if the tree should stay clean.
 Pre-release tags work the same way:
 
 ```bash
-./scripts/get_build.sh v3.1.0.0-rc1
-# faultycat_v3.1.0.0-rc1.uf2  ← suffix preserved in the filename
+./scripts/get_build.sh v2.3.0.0-rc1
+# faultycat_v2.3.0.0-rc1.uf2  ← suffix preserved in the filename
 ```
 
 ## Flashing a release (end-user guide)
@@ -234,7 +234,7 @@ Each GitHub Release ships the firmware UF2:
   1. **Flash the firmware.** Hold the BOOTSEL button on the FaultyCat
      while plugging the USB cable. The board appears as a
      mass-storage volume named `RPI-RP2`. Drag
-     `faultycat_v3.0.1.0.uf2` onto that volume; the board reboots
+     `faultycat_v2.2.2.0.uf2` onto that volume; the board reboots
      into the new firmware automatically and re-enumerates as
      `1209:fa17`.
 
@@ -242,7 +242,7 @@ Each GitHub Release ships the firmware UF2:
      or the `version` shell command:
 
      ```
-     SHELL: VERSION 3.0.1.0
+     SHELL: VERSION 2.2.2.0
      ```
 
   3. **Pair with a compatible host tool, if you use one.** See its

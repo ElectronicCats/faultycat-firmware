@@ -46,12 +46,15 @@ wire-protocol parameter matrix, live in
 [`docs/GLITCHING.md`](docs/GLITCHING.md).
 
 Beyond glitching, the firmware also exposes (over the scanner USB
-CDC) an SWD pinout scanner, and — currently gated as work-in-progress
-for the v3.0 release — direct SWD/JTAG verbs, a JTAG pinout scanner,
-BusPirate/`serprog` compatibility modes, and a passive I2C logic
-analyzer reachable via the SUMP/OLS protocol. See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current
-status of every service.
+CDC) an SWD pinout scanner, a JTAG/BusPirate/`serprog`-compatible
+scanner header, and a protocol-agnostic 8-channel logic analyzer
+(GP0..GP7, decoded host-side in PulseView/sigrok — see
+[`docs/LOGIC_ANALYZER.md`](docs/LOGIC_ANALYZER.md)). Direct SWD/JTAG
+verbs and the JTAG pinout scanner (`scan jtag`) are currently gated
+as work-in-progress for the v3.0 release; `scan swd`, the
+BusPirate/`serprog` compatibility modes, and the logic analyzer all
+ship in this release. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+for the current status of every service.
 
 ## Building the firmware
 
@@ -112,6 +115,7 @@ safety gate for any change touching the HV path are in
 | [`docs/JTAG_INTERNALS.md`](docs/JTAG_INTERNALS.md) | JTAG core, pinout scanner, BusPirate/serprog wire stack. |
 | [`docs/SWD_SCANNER_INTERNALS.md`](docs/SWD_SCANNER_INTERNALS.md) | SWD pinout scanner internals. |
 | [`docs/I2C_SCANNER_INTERNALS.md`](docs/I2C_SCANNER_INTERNALS.md) | I2C and SWD scanner internals. |
+| [`docs/LOGIC_ANALYZER.md`](docs/LOGIC_ANALYZER.md) | Protocol-agnostic 8-channel logic analyzer, SUMP/OLS PulseView transport, raw-path trigger. |
 | [`docs/MUTEX_INTERNALS.md`](docs/MUTEX_INTERNALS.md) | SWD bus arbitration and campaign manager. |
 | [`docs/PORTING.md`](docs/PORTING.md) | Porting notes from the legacy v2.x firmware. |
 
