@@ -89,7 +89,7 @@ static inline uint32_t pio_glitch_compile_trigger_block(uint16_t* out, uint8_t t
 // (crowbar's gate pin needs it embedded in-program — see crowbar_pio.c's
 // build_program comment for why; EMFI's GP14 doesn't).
 static inline uint32_t pio_glitch_build_program(uint16_t* prog, uint8_t trig, uint16_t irq_op,
-                                                 bool with_pindir_setup) {
+                                                bool with_pindir_setup) {
     uint32_t len = 0;
     if (with_pindir_setup)
         prog[len++] = PIO_OP_SET_PINDIRS_OUT;
