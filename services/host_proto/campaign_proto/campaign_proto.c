@@ -8,19 +8,7 @@
 
 #include <string.h>
 
-// Little-endian decode helpers — match the existing emfi_proto /
-// crowbar_proto convention.
-static uint32_t le32_decode(const uint8_t* p) {
-    return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static void le32_encode(uint8_t* p, uint32_t v) {
-    p[0] = (uint8_t)(v & 0xFFu);
-    p[1] = (uint8_t)((v >> 8) & 0xFFu);
-    p[2] = (uint8_t)((v >> 16) & 0xFFu);
-    p[3] = (uint8_t)((v >> 24) & 0xFFu);
-}
+#include "frame_proto.h"
 
 bool campaign_proto_decode_config(const uint8_t* payload, size_t len, campaign_engine_t engine,
                                   campaign_config_t* out) {
@@ -30,16 +18,16 @@ bool campaign_proto_decode_config(const uint8_t* payload, size_t len, campaign_e
         return false;
 
     out->engine      = engine;
-    out->delay.start = le32_decode(&payload[0]);
-    out->delay.end   = le32_decode(&payload[4]);
-    out->delay.step  = le32_decode(&payload[8]);
-    out->width.start = le32_decode(&payload[12]);
-    out->width.end   = le32_decode(&payload[16]);
-    out->width.step  = le32_decode(&payload[20]);
-    out->power.start = le32_decode(&payload[24]);
-    out->power.end   = le32_decode(&payload[28]);
-    out->power.step  = le32_decode(&payload[32]);
-    out->settle_ms   = le32_decode(&payload[36]);
+    out->delay.start = frame_proto_unpack_u32_le(&payload[0]);
+    out->delay.end   = frame_proto_unpack_u32_le(&payload[4]);
+    out->delay.step  = frame_proto_unpack_u32_le(&payload[8]);
+    out->width.start = frame_proto_unpack_u32_le(&payload[12]);
+    out->width.end   = frame_proto_unpack_u32_le(&payload[16]);
+    out->width.step  = frame_proto_unpack_u32_le(&payload[20]);
+    out->power.start = frame_proto_unpack_u32_le(&payload[24]);
+    out->power.end   = frame_proto_unpack_u32_le(&payload[28]);
+    out->power.step  = frame_proto_unpack_u32_le(&payload[32]);
+    out->settle_ms   = frame_proto_unpack_u32_le(&payload[36]);
     return true;
 }
 
@@ -61,10 +49,10 @@ size_t campaign_proto_serialize_status(uint8_t* out, size_t cap) {
     out[1] = (uint8_t)st.err;
     out[2] = 0u; // reserved
     out[3] = 0u;
-    le32_encode(&out[4], st.step_n);
-    le32_encode(&out[8], st.total_steps);
-    le32_encode(&out[12], st.results_pushed);
-    le32_encode(&out[16], st.results_dropped);
+    frame_proto_pack_u32_le(&out[4], st.step_n);
+    frame_proto_pack_u32_le(&out[8], st.total_steps);
+    frame_proto_pack_u32_le(&out[12], st.results_pushed);
+    frame_proto_pack_u32_le(&out[16], st.results_dropped);
     return CAMPAIGN_STATUS_REPLY_LEN;
 }
 

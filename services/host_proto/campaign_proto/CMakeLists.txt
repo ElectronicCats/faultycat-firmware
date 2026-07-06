@@ -10,5 +10,6 @@ target_include_directories(host_proto_campaign
 target_link_libraries(host_proto_campaign
     PUBLIC
         hal_rp2040
+        host_proto_frame
         service_campaign_manager
 )
