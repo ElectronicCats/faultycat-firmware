@@ -331,12 +331,14 @@ function(faultycat_add_service_campaign_proto_test name)
     add_executable(${name}
         ${name}.c
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto/campaign_proto.c
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto/frame_proto.c
         ${CMAKE_SOURCE_DIR}/services/campaign_manager/campaign_manager.c
     )
     target_link_libraries(${name} PRIVATE unity hal_fake)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/drivers/include
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
+        ${CMAKE_SOURCE_DIR}/services/host_proto/frame_proto
         ${CMAKE_SOURCE_DIR}/services/campaign_manager
     )
     add_test(NAME ${name} COMMAND ${name})
