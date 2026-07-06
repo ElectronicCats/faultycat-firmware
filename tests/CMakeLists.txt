@@ -58,6 +58,7 @@ function(faultycat_add_service_emfi_test name)
         ${CMAKE_SOURCE_DIR}/drivers/emfi_pulse
         ${CMAKE_SOURCE_DIR}/drivers/hv_charger
         ${CMAKE_SOURCE_DIR}/drivers/ext_trigger
+        ${CMAKE_SOURCE_DIR}/services/glitch_engine
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/emfi
         ${CMAKE_SOURCE_DIR}/services/host_proto/emfi_proto
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
@@ -117,6 +118,7 @@ function(faultycat_add_service_crowbar_test name)
         ${CMAKE_SOURCE_DIR}/drivers/include
         ${CMAKE_SOURCE_DIR}/drivers/crowbar_mosfet
         ${CMAKE_SOURCE_DIR}/drivers/ext_trigger
+        ${CMAKE_SOURCE_DIR}/services/glitch_engine
         ${CMAKE_SOURCE_DIR}/services/glitch_engine/crowbar
         ${CMAKE_SOURCE_DIR}/services/host_proto/crowbar_proto
         ${CMAKE_SOURCE_DIR}/services/host_proto/campaign_proto
