@@ -12,6 +12,7 @@ target_link_libraries(service_crowbar
     PUBLIC
         hal_rp2040
         board_v2_header
+        glitch_pio_prog_header
         driver_crowbar_mosfet
         driver_ext_trigger
 )

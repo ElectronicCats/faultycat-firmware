@@ -3,35 +3,7 @@
 #include "board_v2.h"
 #include "hal/gpio.h"
 #include "hal/pio.h"
-
-// ---------------------------------------------------------------------------
-// PIO instruction encodings (RP2040 datasheet §3.4)
-//
-// Same opcode set as services/glitch_engine/emfi/emfi_pio with one
-// exception: this program raises IRQ 1 instead of IRQ 0 so the
-// crowbar fire path can coexist with EMFI on the same pio0 instance
-// without sharing an interrupt flag.
-// ---------------------------------------------------------------------------
-
-#define OP_PULL_BLOCK   0x80A0u
-#define OP_OUT_Y_32     0x6040u
-#define OP_WAIT_0_PIN0  0x2020u
-#define OP_WAIT_1_PIN0  0x20A0u
-#define OP_SET_PIN_HIGH 0xE001u
-#define OP_SET_PIN_LOW  0xE000u
-// SET PINDIRS, 1 — drives the SM-controlled pin to OUTPUT. Encoded
-// as SET (1110) with destination = PINDIRS (100, bits 7:5) and
-// value = 1 (bits 4:0). Programmed as the first instruction of
-// every fire so the PIO output enable is set inside the program
-// stream rather than via pio_sm_set_consecutive_pindirs() — the
-// latter writes SMx_INSTR which gets overwritten by the JMP that
-// pio_sm_init() pushes at the end, silently losing the pindir
-// setup on every fire.
-#define OP_SET_PINDIRS_OUT 0xE081u
-#define OP_IRQ1            0xC001u
-static inline uint16_t op_jmp_y_dec(uint8_t addr) {
-    return (uint16_t)(0x0080u | (addr & 0x1Fu));
-}
+#include "pio_glitch_prog.h"
 
 // ---------------------------------------------------------------------------
 // Clock — 125 MHz / 1.0 = 125 MHz PIO clock. 1 instr = 8 ns nominal.
@@ -42,19 +14,12 @@ static inline uint16_t op_jmp_y_dec(uint8_t addr) {
 #define CROWBAR_PIO_TICKS_PER_US 125u
 
 // ---------------------------------------------------------------------------
-// Program layout (mirror of emfi_pio, plus a leading SET PINDIRS):
-//
-// [0]    SET PINDIRS, 1              ; force pin to OUTPUT (see note below)
-// [1]    PULL block                  ; pull delay_ticks into OSR
-// [2]    OUT Y, 32                   ; Y = delay_ticks
-// [3..N] trigger block (0..3 instrs) ; compiled from CROWBAR_TRIG_*
-// [N+1]  JMP Y-- self                ; delay loop
-// [N+2]  PULL block                  ; pull pulse_width_ticks
-// [N+3]  OUT Y, 32                   ; Y = pulse_width_ticks
-// [N+4]  SET pins=1                  ; rising edge of pulse on selected gate
-// [N+5]  JMP Y-- self                ; hold high
-// [N+6]  SET pins=0                  ; falling edge
-// [N+7]  IRQ 1                       ; signal GLITCHED to CPU
+// Program layout: the shared delay/trigger/pulse/IRQ compiler in
+// pio_glitch_prog.h, with a leading SET PINDIRS and IRQ 1 (EMFI uses
+// IRQ 0 — see pio_glitch_build_program's with_pindir_setup/irq_op
+// params). SET PINDIRS, 1 drives the SM-controlled pin to OUTPUT;
+// encoded as SET (1110) with destination = PINDIRS (100, bits 7:5)
+// and value = 1 (bits 4:0).
 //
 // Why SET PINDIRS lives in the program rather than at setup-time:
 // the prior approach used pio_sm_set_consecutive_pindirs() which
@@ -95,51 +60,8 @@ static uint32_t pin_for_output(crowbar_out_t out) {
     }
 }
 
-static uint32_t compile_trigger_block(uint16_t* out, crowbar_trig_t t) {
-    switch (t) {
-        case CROWBAR_TRIG_IMMEDIATE:
-            return 0;
-        case CROWBAR_TRIG_EXT_RISING:
-            out[0] = OP_WAIT_0_PIN0;
-            out[1] = OP_WAIT_1_PIN0;
-            return 2;
-        case CROWBAR_TRIG_EXT_FALLING:
-            out[0] = OP_WAIT_1_PIN0;
-            out[1] = OP_WAIT_0_PIN0;
-            return 2;
-        case CROWBAR_TRIG_EXT_PULSE_POS:
-            out[0] = OP_WAIT_0_PIN0;
-            out[1] = OP_WAIT_1_PIN0;
-            out[2] = OP_WAIT_0_PIN0;
-            return 3;
-        case CROWBAR_TRIG_EXT_PULSE_NEG:
-            // Inverse of PULSE_POS: HIGH-idle, the source dips LOW
-            // briefly and comes back HIGH. The trailing rising edge
-            // is the trigger event. See crowbar_pio.h doc-comment on
-            // crowbar_trig_t for the full per-option contract.
-            out[0] = OP_WAIT_1_PIN0;
-            out[1] = OP_WAIT_0_PIN0;
-            out[2] = OP_WAIT_1_PIN0;
-            return 3;
-    }
-    return 0;
-}
-
 static void build_program(const crowbar_pio_params_t* p) {
-    s_prog_len           = 0;
-    s_prog[s_prog_len++] = OP_SET_PINDIRS_OUT;
-    s_prog[s_prog_len++] = OP_PULL_BLOCK;
-    s_prog[s_prog_len++] = OP_OUT_Y_32;
-    s_prog_len += compile_trigger_block(&s_prog[s_prog_len], p->trigger);
-    uint8_t delay_loop_addr = (uint8_t)s_prog_len;
-    s_prog[s_prog_len++]    = op_jmp_y_dec(delay_loop_addr);
-    s_prog[s_prog_len++]    = OP_PULL_BLOCK;
-    s_prog[s_prog_len++]    = OP_OUT_Y_32;
-    s_prog[s_prog_len++]    = OP_SET_PIN_HIGH;
-    uint8_t hold_loop_addr  = (uint8_t)s_prog_len;
-    s_prog[s_prog_len++]    = op_jmp_y_dec(hold_loop_addr);
-    s_prog[s_prog_len++]    = OP_SET_PIN_LOW;
-    s_prog[s_prog_len++]    = OP_IRQ1;
+    s_prog_len = pio_glitch_build_program(s_prog, p->trigger, PIO_OP_IRQ(1), true);
 }
 
 bool crowbar_pio_init(void) {
