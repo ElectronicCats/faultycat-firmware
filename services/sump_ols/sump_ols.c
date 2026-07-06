@@ -160,6 +160,12 @@ _Static_assert(SUMP_OLS_MAX_SAMPLES <= LA_CAPTURE_BUFFER_BYTES / 2u,
                "lossless capture-then-dump needs ring headroom: the DMA keeps "
                "writing between the fill-complete poll and la_stop()");
 
+// do_arm()'s pretrigger floor comes from la_apply_pretrigger(), which
+// hardcodes LA_PRETRIGGER_MIN — this constant is no longer just
+// documentation, so keep the two in lockstep.
+_Static_assert(SUMP_OLS_PRETRIGGER_MIN == LA_PRETRIGGER_MIN,
+               "sump_ols's pretrigger floor must match la_apply_pretrigger's");
+
 static void do_arm(void) {
     if (!la_is_inited())
         return; // can't happen via main.c's mode-switch gate, but cheap to guard.
@@ -180,35 +186,15 @@ static void do_arm(void) {
 
     s_sump.capturing   = true;
     const uint8_t* buf = la_buffer();
-    uint32_t cursor    = 0u;
 
-    // Phase 1 — wait-for-trigger: advance the cursor through live samples
-    // without emitting until one matches (level match, stage 0). mask == 0
-    // matches the very first sample, so "no trigger configured" (the
-    // memset default) degenerates to an immediate start. See
+    // Phase 1 — wait for the stage-0 trigger (mask == 0 matches the very
+    // first sample, so "no trigger configured" — the memset default —
+    // degenerates to an immediate start). timeout_ms == 0: SUMP has no
+    // host-facing concept of a trigger timeout, so this waits forever,
+    // same as the loop it replaces. See
     // docs/UART_LA_TRIGGER_IMPLEMENTATION_PLAN.md.
-    for (;;) {
-        uint32_t written = la_total();
-        if (written - cursor > LA_CAPTURE_BUFFER_BYTES) {
-            // DMA lapped the unconsumed pre-trigger region — skip to the
-            // oldest sample still in the ring. Best-effort: this can eat
-            // pre-trigger history phase 2's window would have included.
-            cursor = written - LA_CAPTURE_BUFFER_BYTES;
-        }
-        bool matched = false;
-        while (cursor < written) {
-            uint8_t s = buf[cursor % LA_CAPTURE_BUFFER_BYTES];
-            if ((s & s_sump.trigger_mask) == (s_sump.trigger_value & s_sump.trigger_mask)) {
-                matched = true; // cursor now points at the triggering sample
-                break;
-            }
-            cursor++;
-        }
-        if (matched)
-            break;
-        if (s_sump.cb.yield)
-            s_sump.cb.yield(s_sump.cb.user); // keep CDC/USB alive while waiting
-    }
+    uint32_t cursor = la_wait_for_trigger(s_sump.trigger_mask, s_sump.trigger_value,
+                                          s_sump.cb.yield, s_sump.cb.user, 0u);
 
     // Phase 2 — bounded acquisition. SUMP's CAPTURE_SIZE splits the
     // window around the trigger: delaycount*4 samples run AFTER the
@@ -228,19 +214,20 @@ static void do_arm(void) {
     uint32_t post = (s_sump.n_post != 0u) ? s_sump.n_post : n;
     if (post > n)
         post = n;
-    uint32_t pre = n - post;
-    // Floor the history when a real trigger is armed: ratio 0 (the
-    // PulseView default) means pre == 0, which starts the window dead on
-    // the trigger sample and leaves serial decoders nothing to sync on —
-    // see SUMP_OLS_PRETRIGGER_MIN in the header.
-    uint32_t pre_floor = SUMP_OLS_PRETRIGGER_MIN;
-    if (pre_floor > n / 8u)
-        pre_floor = n / 8u;
-    if (s_sump.trigger_mask != 0u && pre < pre_floor)
-        pre = pre_floor;
-    if (pre > cursor)
-        pre = cursor;
-    uint32_t start = cursor - pre;
+    uint32_t requested_pre = n - post;
+    uint32_t start         = (requested_pre > cursor) ? 0u : cursor - requested_pre;
+    // la_apply_pretrigger floors the window at LA_PRETRIGGER_MIN samples
+    // of history (capped at n/8) — but only when a real trigger is
+    // armed. Ratio 0 (the PulseView default) with no trigger must start
+    // dead on `cursor` untouched, or every plain no-trigger capture would
+    // grow a spurious pretrigger tail; with a trigger, take whichever
+    // start reaches further back: the host's own ratio if it already
+    // asked for more history than the floor, or the floor otherwise.
+    if (s_sump.trigger_mask != 0u) {
+        uint32_t floored_start = la_apply_pretrigger(cursor, n);
+        if (floored_start < start)
+            start = floored_start;
+    }
     while (la_total() - start < n) {
         if (s_sump.cb.yield)
             s_sump.cb.yield(s_sump.cb.user);

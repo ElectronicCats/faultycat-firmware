@@ -141,10 +141,9 @@ const uint8_t* la_buffer(void);
 // periodically while waiting so USB/CDC stays serviced. Requires a
 // capture already running (la_start).
 //
-// Same wait-then-scan loop services/sump_ols/sump_ols.c's do_arm() hand-
-// rolls for its stage-0 trigger, lifted out so it has one implementation
-// instead of two — do_arm() itself is not changed to call this (see
-// LA_CAPTURE_TRIGGER_IMPLEMENTATION_PLAN.md's "Out of scope").
+// Same wait-then-scan loop services/sump_ols/sump_ols.c's do_arm() used
+// to hand-roll for its stage-0 trigger, lifted out so there's one
+// implementation instead of two; do_arm() now calls this directly.
 //
 // Returns the ring cursor (in la_total()'s absolute sample numbering) of
 // the matching sample, or LA_NO_TRIGGER_MATCH if timeout_ms elapses
@@ -157,6 +156,9 @@ uint32_t la_wait_for_trigger(uint8_t mask, uint8_t value, void (*yield)(void* us
 // count `n` about to be captured, returns the adjusted start cursor that
 // reserves up to LA_PRETRIGGER_MIN samples of pre-trigger history —
 // capped at n/8 for small captures, and at `cursor` itself when less
-// history than that has actually been captured yet. Mirrors do_arm()'s
-// pretrigger math in services/sump_ols/sump_ols.c.
+// history than that has actually been captured yet. Used directly by
+// services/sump_ols/sump_ols.c's do_arm() as the floor half of its own
+// pretrigger math, which additionally honors CMD_CAPTURE_SIZE's
+// host-requested ratio when that already asks for more history than the
+// floor.
 uint32_t la_apply_pretrigger(uint32_t cursor, uint32_t n);
