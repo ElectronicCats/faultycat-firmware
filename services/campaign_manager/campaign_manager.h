@@ -123,6 +123,18 @@ size_t campaign_manager_drain_results(campaign_result_t* out, size_t max_n);
 
 void campaign_manager_set_step_executor(campaign_step_executor_t fn, void* user);
 
+// Stop hook — invoked once, engine-agnostically, whenever a *running*
+// sweep settles into STOPPED: either an immediate `campaign_manager_stop()`
+// on a SWEEPING campaign, or a reentrant stop honored by `tick()` after the
+// in-flight step unwinds. Lets the app tear down / disarm the engine the
+// sweep was driving (EMFI HV cap, crowbar MOSFET) so a STOP always leaves
+// the hardware safe instead of latched armed with a charged cap. `engine`
+// is the stopped sweep's configured engine. Optional; NULL = no teardown
+// (the F9-2 default, used by the tests that predate engine wiring).
+typedef void (*campaign_stop_hook_t)(campaign_engine_t engine, void* user);
+
+void campaign_manager_set_stop_hook(campaign_stop_hook_t fn, void* user);
+
 // Default no-op executor — declared here so tests / F9-3 init can
 // reset to it explicitly.
 bool campaign_noop_executor(uint32_t step, const campaign_config_t* cfg, uint32_t delay,

@@ -31,6 +31,12 @@ typedef struct {
     campaign_step_executor_t executor;
     void* executor_user;
 
+    // Engine-agnostic teardown hook, run when a running sweep stops.
+    // Set by the app to disarm whichever engine the sweep drove (EMFI
+    // HV cap / crowbar MOSFET) so STOP always leaves the hardware safe.
+    campaign_stop_hook_t stop_hook;
+    void* stop_hook_user;
+
     // Ringbuffer — single producer (campaign_manager_tick), single
     // drainer (campaign_manager_drain_results from host_proto).
     // Cooperative single-core, so plain head/tail without atomics.
@@ -162,6 +168,16 @@ size_t campaign_manager_drain_results(campaign_result_t* out, size_t max_n) {
 // State machine
 // -----------------------------------------------------------------------------
 
+// Fire the engine-teardown hook for the sweep's configured engine. Only
+// meaningful once a config has been stored — before that there's nothing
+// armed to disarm. Kept engine-agnostic: campaign_manager never includes
+// the emfi/crowbar headers; the app supplies the disarm behind this hook.
+static void invoke_stop_hook(void) {
+    if (s_cm.stop_hook != NULL && s_cm.cfg_valid) {
+        s_cm.stop_hook(s_cm.cfg.engine, s_cm.stop_hook_user);
+    }
+}
+
 void campaign_manager_init(void) {
     memset(&s_cm, 0, sizeof(s_cm));
     s_cm.state    = CAMPAIGN_STATE_IDLE;
@@ -229,6 +245,11 @@ void campaign_manager_stop(void) {
     }
     if (s_cm.state == CAMPAIGN_STATE_SWEEPING) {
         s_cm.state = CAMPAIGN_STATE_STOPPED;
+        // Disarm the engine now that the sweep has halted. Runs at top
+        // level (not reentrantly — the in_step branch above deferred
+        // that case to tick()), so the engine is between steps and the
+        // disarm is a clean reset back to IDLE.
+        invoke_stop_hook();
     }
 }
 
@@ -295,6 +316,10 @@ void campaign_manager_tick(void) {
         // stop now instead of advancing to the next step.
         s_cm.pending_stop = false;
         s_cm.state        = CAMPAIGN_STATE_STOPPED;
+        // The reentrant STOP was deferred here; the step's fire path has
+        // now fully unwound (its own post-fire teardown already bled the
+        // cap), so disarm the engine to guarantee it's back at IDLE.
+        invoke_stop_hook();
         return;
     }
 
@@ -319,4 +344,9 @@ void campaign_manager_get_status(campaign_status_t* out) {
 void campaign_manager_set_step_executor(campaign_step_executor_t fn, void* user) {
     s_cm.executor      = (fn != NULL) ? fn : campaign_noop_executor;
     s_cm.executor_user = user;
+}
+
+void campaign_manager_set_stop_hook(campaign_stop_hook_t fn, void* user) {
+    s_cm.stop_hook      = fn;
+    s_cm.stop_hook_user = user;
 }
