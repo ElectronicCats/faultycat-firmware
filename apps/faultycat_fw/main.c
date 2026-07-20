@@ -1478,15 +1478,45 @@ static bool campaign_executor_emfi(uint32_t step, uint32_t delay, uint32_t width
         .charge_timeout_ms = CAMPAIGN_HV_CHARGE_WAIT_MS,
     };
     if (!emfi_campaign_configure(&cfg)) {
-        *out_fire = 1;
+        *out_fire = CAMPAIGN_FIRE_CONFIGURE_ERR;
         return false;
     }
     if (!emfi_campaign_arm()) {
-        *out_fire = 2;
+        *out_fire = CAMPAIGN_FIRE_ARM_ERR;
         return false;
     }
+
+    // emfi_campaign_arm() is asynchronous: it only starts the HV charge
+    // and sets state ARMING. The ARMING→CHARGED transition happens inside
+    // emfi_campaign_tick()/tick_arming() once hv_charger_is_charged() goes
+    // true. fire() rejects anything but CHARGED, so we must pump tick()
+    // here until the cap is charged before calling fire(). The bound is
+    // CAMPAIGN_HV_CHARGE_WAIT_MS + 500 ms so that, on a genuine charge
+    // failure, the engine's own tick_arming timeout (== charge_timeout_ms)
+    // wins the race and surfaces the real EMFI_ERR_HV_NOT_CHARGED cause
+    // instead of this executor's generic timeout.
+    uint32_t charge_start = hal_now_ms();
+    while (true) {
+        emfi_campaign_tick();
+        emfi_status_t st;
+        emfi_campaign_get_status(&st);
+        if (st.state == EMFI_STATE_CHARGED) {
+            break;
+        }
+        if (st.state == EMFI_STATE_ERROR) {
+            *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
+            return false;
+        }
+        if ((uint32_t)(hal_now_ms() - charge_start) > CAMPAIGN_HV_CHARGE_WAIT_MS + 500u) {
+            *out_fire = CAMPAIGN_FIRE_CHARGE_TIMEOUT;
+            return false;
+        }
+        campaign_yield_pump();
+        hal_sleep_ms(1u);
+    }
+
     if (!emfi_campaign_fire(CAMPAIGN_FIRE_TIMEOUT_MS)) {
-        *out_fire = 3;
+        *out_fire = CAMPAIGN_FIRE_FIRE_REJECTED;
         return false;
     }
 
@@ -1498,16 +1528,16 @@ static bool campaign_executor_emfi(uint32_t step, uint32_t delay, uint32_t width
         emfi_status_t st;
         emfi_campaign_get_status(&st);
         if (st.state == EMFI_STATE_FIRED) {
-            *out_fire   = 0;
+            *out_fire   = CAMPAIGN_FIRE_OK;
             *out_target = st.delay_us_actual; // diag echo
             break;
         }
         if (st.state == EMFI_STATE_ERROR) {
-            *out_fire = (uint8_t)(0x80u | (uint8_t)st.err);
+            *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
             return false;
         }
         if ((uint32_t)(hal_now_ms() - start) > CAMPAIGN_FIRE_TIMEOUT_MS) {
-            *out_fire = 4; // engine-side stuck timeout
+            *out_fire = CAMPAIGN_FIRE_ENGINE_STUCK; // engine-side stuck timeout
             return false;
         }
         campaign_yield_pump();
@@ -1528,15 +1558,15 @@ static bool campaign_executor_crowbar(uint32_t step, uint32_t delay, uint32_t wi
         .width_ns = width,
     };
     if (!crowbar_campaign_configure(&cfg)) {
-        *out_fire = 1;
+        *out_fire = CAMPAIGN_FIRE_CONFIGURE_ERR;
         return false;
     }
     if (!crowbar_campaign_arm()) {
-        *out_fire = 2;
+        *out_fire = CAMPAIGN_FIRE_ARM_ERR;
         return false;
     }
     if (!crowbar_campaign_fire(CAMPAIGN_FIRE_TIMEOUT_MS)) {
-        *out_fire = 3;
+        *out_fire = CAMPAIGN_FIRE_FIRE_REJECTED;
         return false;
     }
 
@@ -1546,16 +1576,16 @@ static bool campaign_executor_crowbar(uint32_t step, uint32_t delay, uint32_t wi
         crowbar_status_t st;
         crowbar_campaign_get_status(&st);
         if (st.state == CROWBAR_STATE_FIRED) {
-            *out_fire   = 0;
+            *out_fire   = CAMPAIGN_FIRE_OK;
             *out_target = (uint32_t)output; // diag echo
             break;
         }
         if (st.state == CROWBAR_STATE_ERROR) {
-            *out_fire = (uint8_t)(0x80u | (uint8_t)st.err);
+            *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
             return false;
         }
         if ((uint32_t)(hal_now_ms() - start) > CAMPAIGN_FIRE_TIMEOUT_MS) {
-            *out_fire = 4;
+            *out_fire = CAMPAIGN_FIRE_ENGINE_STUCK;
             return false;
         }
         campaign_yield_pump();
