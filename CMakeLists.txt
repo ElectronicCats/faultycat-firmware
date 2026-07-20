@@ -47,7 +47,7 @@ project(faultycat
     # 4-segment version (BOARD.MAJOR.MINOR.PATCH). Bumped in-place by
     # the release workflow's `sed` step on every `vA.X.Y.Z` tag push.
     # The workflow rejects tags that don't match the 4-segment shape.
-    VERSION      2.2.1.0
+    VERSION      2.2.1.1
     LANGUAGES    C CXX ASM
     DESCRIPTION  "FaultyCat v3 firmware (rewrite, runs on HW v2.x)"
 )
