@@ -40,6 +40,28 @@ typedef enum {
     CAMPAIGN_ERR_INTERNAL       = 5,
 } campaign_err_t;
 
+// Executor-phase status for a step's `fire_status` byte. These are the
+// executor's OWN codes for the configure→arm→charge→fire pipeline, and
+// must NOT collide with either engine's `*_err_t` (0..5) nor with the
+// `0x80 | (*_err_t)` encoding used when the engine itself enters ERROR.
+// The high range (0xE0+) keeps all three namespaces disjoint so the host
+// can decode `fire_status` unambiguously:
+//   0x00        → step fired cleanly
+//   0x80..0xBF  → engine ERROR, real `*_err_t` in the low 7 bits
+//   0xE0..0xEF  → executor phase failure (this enum)
+typedef enum {
+    CAMPAIGN_FIRE_OK             = 0x00,
+    CAMPAIGN_FIRE_CONFIGURE_ERR  = 0xE1, // engine configure() rejected the step
+    CAMPAIGN_FIRE_ARM_ERR        = 0xE2, // engine arm() rejected the step
+    CAMPAIGN_FIRE_CHARGE_TIMEOUT = 0xE3, // HV never reached CHARGED before wait bound
+    CAMPAIGN_FIRE_FIRE_REJECTED  = 0xE4, // engine fire() returned false (wrong state)
+    CAMPAIGN_FIRE_ENGINE_STUCK   = 0xE5, // engine never reached FIRED before wait bound
+} campaign_fire_status_t;
+
+// Marker bit OR'd with a real `*_err_t` when the engine enters its ERROR
+// state, so the host can tell an engine error from an executor-phase code.
+#define CAMPAIGN_FIRE_ENGINE_ERR_FLAG 0x80u
+
 typedef struct {
     uint32_t start;
     uint32_t end;
