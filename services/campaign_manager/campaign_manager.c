@@ -38,6 +38,16 @@ typedef struct {
     uint32_t ring_head;  // write index
     uint32_t ring_tail;  // read index
     uint32_t ring_count; // 0..CAMPAIGN_RESULT_RING_DEPTH
+
+    // Reentrancy guard. A step executor is blocking (it can spin for
+    // seconds waiting on HV charge / trigger), and while it blocks the
+    // main loop keeps pumping the CDC that carries campaign commands —
+    // so a host CONFIG/START/STOP can land *inside* the executor call
+    // stack (main → tick → executor → yield_pump → cdc → proto →
+    // campaign_manager_*). `in_step` lets the control entrypoints refuse
+    // or defer such reentrant calls instead of mutating the live sweep.
+    bool in_step;
+    bool pending_stop; // reentrant stop requested mid-step; honored on return
 } cm_t;
 
 static cm_t s_cm;
@@ -163,9 +173,13 @@ bool campaign_manager_configure(const campaign_config_t* cfg) {
         s_cm.err = CAMPAIGN_ERR_BAD_CONFIG;
         return false;
     }
-    if (s_cm.state == CAMPAIGN_STATE_SWEEPING) {
-        // Reconfiguring mid-sweep is a programmer error — refuse.
-        s_cm.err = CAMPAIGN_ERR_BAD_CONFIG;
+    if (s_cm.in_step || s_cm.state == CAMPAIGN_STATE_SWEEPING) {
+        // Reconfiguring mid-sweep is refused. Crucially we do NOT touch
+        // s_cm.err/state here: a reentrant CONFIG arriving on the CDC pump
+        // while a blocking step executor runs would otherwise stamp
+        // BAD_CONFIG onto a perfectly valid running sweep, making STATUS
+        // report a bogus "SWEEPING + BAD_CONFIG". The refusal is signalled
+        // by the return value only — the proto layer maps it to REJECTED.
         return false;
     }
     uint32_t total = campaign_total_steps(cfg);
@@ -187,8 +201,9 @@ bool campaign_manager_start(void) {
         s_cm.err = CAMPAIGN_ERR_NOT_CONFIGURED;
         return false;
     }
-    if (s_cm.state == CAMPAIGN_STATE_SWEEPING) {
-        // Already running.
+    if (s_cm.in_step || s_cm.state == CAMPAIGN_STATE_SWEEPING) {
+        // Already running (or a reentrant start landing inside a blocking
+        // step executor — refuse without disturbing the live sweep).
         return false;
     }
     s_cm.step_n          = 0u;
@@ -204,6 +219,14 @@ bool campaign_manager_start(void) {
 }
 
 void campaign_manager_stop(void) {
+    if (s_cm.in_step) {
+        // Stop requested reentrantly while a step executor is mid-fire.
+        // Flipping state now would be clobbered when the executor returns
+        // and tick() advances/finishes the step, so defer it — tick()
+        // honors pending_stop right after the executor unwinds.
+        s_cm.pending_stop = true;
+        return;
+    }
     if (s_cm.state == CAMPAIGN_STATE_SWEEPING) {
         s_cm.state = CAMPAIGN_STATE_STOPPED;
     }
@@ -234,10 +257,15 @@ void campaign_manager_tick(void) {
     uint8_t fire_status   = 0u;
     uint8_t verify_status = 0u;
     uint32_t target_state = 0u;
-    bool ok               = (s_cm.executor != NULL)
-                                ? s_cm.executor(s_cm.step_n, &s_cm.cfg, delay, width, power, &fire_status,
-                                                &verify_status, &target_state, s_cm.executor_user)
-                                : false;
+    // Mark the reentrancy guard across the (blocking) executor call so a
+    // host CONFIG/START/STOP arriving on the CDC pump mid-fire can't mutate
+    // the live sweep. See cm_t.in_step.
+    s_cm.in_step = true;
+    bool ok      = (s_cm.executor != NULL)
+                       ? s_cm.executor(s_cm.step_n, &s_cm.cfg, delay, width, power, &fire_status,
+                                       &verify_status, &target_state, s_cm.executor_user)
+                       : false;
+    s_cm.in_step = false;
 
     campaign_result_t r = {
         .step_n        = s_cm.step_n,
@@ -255,8 +283,18 @@ void campaign_manager_tick(void) {
         // Step executor reported failure. Record the result, mark
         // ERROR, and stop. F9-3's adapter will surface engine-specific
         // status codes via `fire_status` so the host can diagnose.
-        s_cm.err   = CAMPAIGN_ERR_STEP_FAILED;
-        s_cm.state = CAMPAIGN_STATE_ERROR;
+        s_cm.err          = CAMPAIGN_ERR_STEP_FAILED;
+        s_cm.state        = CAMPAIGN_STATE_ERROR;
+        s_cm.pending_stop = false;
+        return;
+    }
+
+    if (s_cm.pending_stop) {
+        // A stop arrived (reentrantly) while this step was firing. The
+        // step completed cleanly and its result is recorded; honor the
+        // stop now instead of advancing to the next step.
+        s_cm.pending_stop = false;
+        s_cm.state        = CAMPAIGN_STATE_STOPPED;
         return;
     }
 
