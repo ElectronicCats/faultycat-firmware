@@ -398,6 +398,68 @@ static void test_reconfigure_mid_sweep_rejected(void) {
     campaign_status_t st;
     campaign_manager_get_status(&st);
     TEST_ASSERT_EQUAL(CAMPAIGN_STATE_SWEEPING, st.state); // unchanged
+    // The refused reconfigure must NOT stamp BAD_CONFIG onto the live
+    // sweep — otherwise STATUS reports a bogus "SWEEPING + BAD_CONFIG".
+    TEST_ASSERT_EQUAL(CAMPAIGN_ERR_NONE, st.err);
+}
+
+// -----------------------------------------------------------------------------
+// Reentrancy guard — a host CONFIG/STOP can arrive on the CDC pump while a
+// blocking step executor is mid-fire (main → tick → executor → yield_pump →
+// cdc → proto → campaign_manager_*). Such reentrant control must not corrupt
+// the live sweep.
+// -----------------------------------------------------------------------------
+
+static bool s_reentrant_configure_ret;
+static campaign_err_t s_reentrant_err_during;
+static campaign_state_t s_reentrant_state_during;
+
+static bool reentrant_control_executor(uint32_t step, const campaign_config_t* cfg, uint32_t delay,
+                                       uint32_t width, uint32_t power, uint8_t* fire,
+                                       uint8_t* verify, uint32_t* target, void* user) {
+    (void)step;
+    (void)cfg;
+    (void)delay;
+    (void)width;
+    (void)power;
+    (void)verify;
+    (void)target;
+    (void)user;
+    // Simulate a host CONFIG landing inside the fire path.
+    campaign_config_t other   = small_config();
+    other.width.end           = 5;
+    s_reentrant_configure_ret = campaign_manager_configure(&other);
+    // And a host STOP landing inside the fire path.
+    campaign_manager_stop();
+    campaign_status_t st;
+    campaign_manager_get_status(&st);
+    s_reentrant_err_during   = st.err;
+    s_reentrant_state_during = st.state;
+    if (fire)
+        *fire = 0x00;
+    return true;
+}
+
+static void test_reentrant_control_during_step_is_guarded(void) {
+    campaign_manager_set_step_executor(reentrant_control_executor, NULL);
+    campaign_config_t cfg = small_config(); // 3 steps
+    campaign_manager_configure(&cfg);
+    campaign_manager_start();
+    campaign_manager_tick(); // step 0: executor reenters configure + stop
+
+    // Reentrant configure was refused without clobbering the live sweep,
+    // and reentrant stop was deferred (state still SWEEPING mid-executor).
+    TEST_ASSERT_FALSE(s_reentrant_configure_ret);
+    TEST_ASSERT_EQUAL(CAMPAIGN_ERR_NONE, s_reentrant_err_during);
+    TEST_ASSERT_EQUAL(CAMPAIGN_STATE_SWEEPING, s_reentrant_state_during);
+
+    // After the executor unwinds, the deferred stop is honored and the
+    // step's result is still recorded.
+    campaign_status_t st;
+    campaign_manager_get_status(&st);
+    TEST_ASSERT_EQUAL(CAMPAIGN_STATE_STOPPED, st.state);
+    TEST_ASSERT_EQUAL(CAMPAIGN_ERR_NONE, st.err);
+    TEST_ASSERT_EQUAL_UINT32(1u, st.results_pushed);
 }
 
 // -----------------------------------------------------------------------------
@@ -448,6 +510,7 @@ int main(void) {
     RUN_TEST(test_default_executor_is_noop);
 
     RUN_TEST(test_reconfigure_mid_sweep_rejected);
+    RUN_TEST(test_reentrant_control_during_step_is_guarded);
 
     RUN_TEST(test_result_record_is_28_bytes);
 
