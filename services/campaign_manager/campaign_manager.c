@@ -261,7 +261,16 @@ void campaign_manager_tick(void) {
         return;
     }
 
-    // Inter-step settle.
+    // Post-fire cooldown (settle_ms). This is the ONLY inter-step wait,
+    // and it is a cooldown that runs AFTER the previous step's fire
+    // (last_step_at_ms is stamped post-fire, below) and BEFORE the next
+    // step's executor arms. It deliberately does NOT gate the trigger
+    // wait: the executor arms the engine and waits for the external
+    // trigger with no blind window in front of it, so an operator edge is
+    // never dropped into a disarmed pre-arm gap. Step 0 skips this
+    // (last_step_at_ms == 0) — the sweep arms immediately on START. Size
+    // settle_ms to the target's recovery time; the trigger itself paces
+    // the shots, so it is not a shot-spacing knob.
     if (s_cm.cfg.settle_ms > 0u && s_cm.last_step_at_ms != 0u) {
         uint32_t elapsed = (uint32_t)(hal_now_ms() - s_cm.last_step_at_ms);
         if (elapsed < s_cm.cfg.settle_ms)
@@ -328,6 +337,14 @@ void campaign_manager_tick(void) {
     if (s_cm.step_n >= s_cm.total_steps) {
         s_cm.state = CAMPAIGN_STATE_DONE;
     }
+}
+
+bool campaign_manager_stop_pending(void) {
+    // Reflects the reentrant-stop flag set by campaign_manager_stop() when
+    // it lands mid-step. A blocking executor polls this to abort an
+    // otherwise-unbounded armed trigger wait. tick() clears/honors the flag
+    // once the executor returns.
+    return s_cm.pending_stop;
 }
 
 void campaign_manager_get_status(campaign_status_t* out) {

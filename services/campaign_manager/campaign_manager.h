@@ -56,6 +56,7 @@ typedef enum {
     CAMPAIGN_FIRE_CHARGE_TIMEOUT = 0xE3, // HV never reached CHARGED before wait bound
     CAMPAIGN_FIRE_FIRE_REJECTED  = 0xE4, // engine fire() returned false (wrong state)
     CAMPAIGN_FIRE_ENGINE_STUCK   = 0xE5, // engine never reached FIRED before wait bound
+    CAMPAIGN_FIRE_ABORTED        = 0xE6, // host STOP arrived while armed, waiting on trigger
 } campaign_fire_status_t;
 
 // Marker bit OR'd with a real `*_err_t` when the engine enters its ERROR
@@ -117,6 +118,15 @@ bool campaign_manager_configure(const campaign_config_t* cfg);
 bool campaign_manager_start(void);
 void campaign_manager_stop(void);
 void campaign_manager_tick(void);
+
+// True while a STOP has been requested reentrantly from inside a running
+// step (i.e. a host STOP that landed on the CDC pump the executor drives
+// while it blocks). A blocking executor that keeps the engine ARMED and
+// waits for an external trigger — which may never arrive — polls this so
+// it can abort the wait, disarm, and return; tick() then settles the
+// sweep into STOPPED. Without it, a trigger-armed crowbar sweep could
+// only be stopped by the trigger finally firing.
+bool campaign_manager_stop_pending(void);
 
 void campaign_manager_get_status(campaign_status_t* out);
 size_t campaign_manager_drain_results(campaign_result_t* out, size_t max_n);
