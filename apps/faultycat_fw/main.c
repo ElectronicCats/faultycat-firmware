@@ -1544,6 +1544,17 @@ static bool campaign_executor_emfi(uint32_t step, uint32_t delay, uint32_t width
             *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
             return false;
         }
+        if (campaign_manager_stop_pending()) {
+            // Honor a host STOP promptly instead of holding the charged
+            // cap until the timeout below. disarm() bleeds the cap and
+            // resets the engine; campaign_manager settles to STOPPED once
+            // we return. Unlike crowbar, EMFI keeps the bounded wait — the
+            // HV cap can't sit charged indefinitely (hv_charger auto-disarms
+            // at 60 s), so an unbounded armed trigger wait isn't safe here.
+            emfi_campaign_disarm();
+            *out_fire = CAMPAIGN_FIRE_ABORTED;
+            break;
+        }
         if ((uint32_t)(hal_now_ms() - start) > CAMPAIGN_FIRE_TIMEOUT_MS) {
             *out_fire = CAMPAIGN_FIRE_ENGINE_STUCK; // engine-side stuck timeout
             return false;
@@ -1581,12 +1592,20 @@ static bool campaign_executor_crowbar(uint32_t step, uint32_t delay, uint32_t wi
         *out_fire = CAMPAIGN_FIRE_ARM_ERR;
         return false;
     }
-    if (!crowbar_campaign_fire(CAMPAIGN_FIRE_TIMEOUT_MS)) {
+    // trigger_timeout = 0 → the engine keeps the PIO ARMED and waits on
+    // the external trigger indefinitely (crowbar_campaign tick_waiting
+    // treats 0 as "wait forever"). Crowbar has no HV cap to bleed, so
+    // holding the gate armed between the operator's edges is free — the
+    // flanco, not a timeout, fires each step. This is what fixes "only the
+    // first trigger is detected": every step now arms and waits for its
+    // own edge instead of the old 10 s window that mostly fell inside the
+    // post-fire settle gap. The sweep-level settle_ms handles inter-shot
+    // spacing; a host STOP is the abort path (polled below).
+    if (!crowbar_campaign_fire(0u)) {
         *out_fire = CAMPAIGN_FIRE_FIRE_REJECTED;
         return false;
     }
 
-    uint32_t start = hal_now_ms();
     while (true) {
         crowbar_campaign_tick();
         crowbar_status_t st;
@@ -1600,9 +1619,15 @@ static bool campaign_executor_crowbar(uint32_t step, uint32_t delay, uint32_t wi
             *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
             return false;
         }
-        if ((uint32_t)(hal_now_ms() - start) > CAMPAIGN_FIRE_TIMEOUT_MS) {
-            *out_fire = CAMPAIGN_FIRE_ENGINE_STUCK;
-            return false;
+        if (campaign_manager_stop_pending()) {
+            // A host STOP landed on the CDC pump while we were armed,
+            // waiting on the trigger. Disarm the gate now and return
+            // cleanly; campaign_manager honors the pending stop and
+            // settles the sweep into STOPPED once we unwind. Without this
+            // the wait above would be unbounded when no edge ever comes.
+            crowbar_campaign_disarm();
+            *out_fire = CAMPAIGN_FIRE_ABORTED;
+            break;
         }
         campaign_yield_pump();
         hal_sleep_ms(1u);
