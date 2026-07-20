@@ -1635,6 +1635,22 @@ static bool campaign_dispatch_executor(uint32_t step, const campaign_config_t* c
     return true;
 }
 
+// Engine teardown on sweep stop. campaign_manager calls this whenever a
+// running sweep is stopped (a host STOP over CDC, or a reentrant stop
+// honored after the in-flight step unwinds). The per-step executors arm
+// the EMFI HV cap / crowbar MOSFET on every fire and rely on the engine's
+// own post-fire teardown to disarm — but a STOP can land mid-charge /
+// mid-fire, so disarm the sweep's engine explicitly here to guarantee the
+// HV cap is bled and the engine is back at IDLE once the sweep halts.
+static void campaign_stop_hook(campaign_engine_t engine, void* user) {
+    (void)user;
+    if (engine == CAMPAIGN_ENGINE_EMFI) {
+        emfi_campaign_disarm();
+    } else {
+        crowbar_campaign_disarm();
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Campaign shell — minimal subset for F9-3 smoke. Real config + start
 // goes through F9-4's host_proto over CDC0 (EMFI campaigns) and CDC1
@@ -2065,6 +2081,7 @@ int main(void) {
     swd_bus_lock_init();
     campaign_manager_init();
     campaign_manager_set_step_executor(campaign_dispatch_executor, NULL);
+    campaign_manager_set_stop_hook(campaign_stop_hook, NULL);
 
     bool last_arm             = false;
     bool last_pulse           = false;
