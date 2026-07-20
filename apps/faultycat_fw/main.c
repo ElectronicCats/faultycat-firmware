@@ -1471,8 +1471,16 @@ static bool campaign_executor_emfi(uint32_t step, uint32_t delay, uint32_t width
     (void)power; // F9-3: power axis unused for EMFI
                  // (HV is binary armed/charged); F10
                  // may map it to charge dwell time.
+    // Preserve whatever trigger the operator last applied via the
+    // engine's own CONFIGURE (e.g. the TUI's Campaign modal pins it on
+    // `emfi` right before Start — see faultycmd-TUI app.py
+    // `_on_configure`). Rebuilding this cfg with a hardcoded
+    // EMFI_TRIG_IMMEDIATE every step silently discarded an
+    // operator-selected external trigger.
+    emfi_config_t prev;
+    emfi_campaign_get_config(&prev);
     emfi_config_t cfg = {
-        .trigger           = EMFI_TRIG_IMMEDIATE,
+        .trigger           = prev.trigger,
         .delay_us          = delay,
         .width_us          = width,
         .charge_timeout_ms = CAMPAIGN_HV_CHARGE_WAIT_MS,
@@ -1551,8 +1559,16 @@ static bool campaign_executor_crowbar(uint32_t step, uint32_t delay, uint32_t wi
                                       uint32_t* out_target) {
     (void)step;
     crowbar_out_t output = (power == 2u) ? CROWBAR_OUT_HP : CROWBAR_OUT_LP;
+    // Preserve whatever trigger the operator last applied via the
+    // engine's own CONFIGURE (e.g. the TUI's Campaign modal pins it on
+    // `crowbar` right before Start — see faultycmd-TUI app.py
+    // `_on_configure`). Rebuilding this cfg with a hardcoded
+    // CROWBAR_TRIG_IMMEDIATE every step silently discarded an
+    // operator-selected external trigger.
+    crowbar_config_t prev;
+    crowbar_campaign_get_config(&prev);
     crowbar_config_t cfg = {
-        .trigger  = CROWBAR_TRIG_IMMEDIATE,
+        .trigger  = prev.trigger,
         .output   = output,
         .delay_us = delay,
         .width_ns = width,
