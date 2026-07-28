@@ -66,5 +66,10 @@ bool emfi_campaign_fire(uint32_t trigger_timeout_ms);
 void emfi_campaign_disarm(void);
 void emfi_campaign_tick(void);
 void emfi_campaign_get_status(emfi_status_t* out);
+// Returns the most recently applied config (all-zero / TRIG_IMMEDIATE
+// before the first configure()). Lets a caller that must rebuild the
+// config per call (e.g. the campaign sweep executor) preserve fields
+// — like `trigger` — it isn't itself sweeping.
+void emfi_campaign_get_config(emfi_config_t* out);
 const uint8_t* emfi_campaign_capture_buffer(void);
 uint32_t emfi_campaign_capture_len(void);

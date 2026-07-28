@@ -1471,22 +1471,60 @@ static bool campaign_executor_emfi(uint32_t step, uint32_t delay, uint32_t width
     (void)power; // F9-3: power axis unused for EMFI
                  // (HV is binary armed/charged); F10
                  // may map it to charge dwell time.
+    // Preserve whatever trigger the operator last applied via the
+    // engine's own CONFIGURE (e.g. the TUI's Campaign modal pins it on
+    // `emfi` right before Start — see faultycmd-TUI app.py
+    // `_on_configure`). Rebuilding this cfg with a hardcoded
+    // EMFI_TRIG_IMMEDIATE every step silently discarded an
+    // operator-selected external trigger.
+    emfi_config_t prev;
+    emfi_campaign_get_config(&prev);
     emfi_config_t cfg = {
-        .trigger           = EMFI_TRIG_IMMEDIATE,
+        .trigger           = prev.trigger,
         .delay_us          = delay,
         .width_us          = width,
         .charge_timeout_ms = CAMPAIGN_HV_CHARGE_WAIT_MS,
     };
     if (!emfi_campaign_configure(&cfg)) {
-        *out_fire = 1;
+        *out_fire = CAMPAIGN_FIRE_CONFIGURE_ERR;
         return false;
     }
     if (!emfi_campaign_arm()) {
-        *out_fire = 2;
+        *out_fire = CAMPAIGN_FIRE_ARM_ERR;
         return false;
     }
+
+    // emfi_campaign_arm() is asynchronous: it only starts the HV charge
+    // and sets state ARMING. The ARMING→CHARGED transition happens inside
+    // emfi_campaign_tick()/tick_arming() once hv_charger_is_charged() goes
+    // true. fire() rejects anything but CHARGED, so we must pump tick()
+    // here until the cap is charged before calling fire(). The bound is
+    // CAMPAIGN_HV_CHARGE_WAIT_MS + 500 ms so that, on a genuine charge
+    // failure, the engine's own tick_arming timeout (== charge_timeout_ms)
+    // wins the race and surfaces the real EMFI_ERR_HV_NOT_CHARGED cause
+    // instead of this executor's generic timeout.
+    uint32_t charge_start = hal_now_ms();
+    while (true) {
+        emfi_campaign_tick();
+        emfi_status_t st;
+        emfi_campaign_get_status(&st);
+        if (st.state == EMFI_STATE_CHARGED) {
+            break;
+        }
+        if (st.state == EMFI_STATE_ERROR) {
+            *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
+            return false;
+        }
+        if ((uint32_t)(hal_now_ms() - charge_start) > CAMPAIGN_HV_CHARGE_WAIT_MS + 500u) {
+            *out_fire = CAMPAIGN_FIRE_CHARGE_TIMEOUT;
+            return false;
+        }
+        campaign_yield_pump();
+        hal_sleep_ms(1u);
+    }
+
     if (!emfi_campaign_fire(CAMPAIGN_FIRE_TIMEOUT_MS)) {
-        *out_fire = 3;
+        *out_fire = CAMPAIGN_FIRE_FIRE_REJECTED;
         return false;
     }
 
@@ -1498,16 +1536,27 @@ static bool campaign_executor_emfi(uint32_t step, uint32_t delay, uint32_t width
         emfi_status_t st;
         emfi_campaign_get_status(&st);
         if (st.state == EMFI_STATE_FIRED) {
-            *out_fire   = 0;
+            *out_fire   = CAMPAIGN_FIRE_OK;
             *out_target = st.delay_us_actual; // diag echo
             break;
         }
         if (st.state == EMFI_STATE_ERROR) {
-            *out_fire = (uint8_t)(0x80u | (uint8_t)st.err);
+            *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
             return false;
         }
+        if (campaign_manager_stop_pending()) {
+            // Honor a host STOP promptly instead of holding the charged
+            // cap until the timeout below. disarm() bleeds the cap and
+            // resets the engine; campaign_manager settles to STOPPED once
+            // we return. Unlike crowbar, EMFI keeps the bounded wait — the
+            // HV cap can't sit charged indefinitely (hv_charger auto-disarms
+            // at 60 s), so an unbounded armed trigger wait isn't safe here.
+            emfi_campaign_disarm();
+            *out_fire = CAMPAIGN_FIRE_ABORTED;
+            break;
+        }
         if ((uint32_t)(hal_now_ms() - start) > CAMPAIGN_FIRE_TIMEOUT_MS) {
-            *out_fire = 4; // engine-side stuck timeout
+            *out_fire = CAMPAIGN_FIRE_ENGINE_STUCK; // engine-side stuck timeout
             return false;
         }
         campaign_yield_pump();
@@ -1521,42 +1570,64 @@ static bool campaign_executor_crowbar(uint32_t step, uint32_t delay, uint32_t wi
                                       uint32_t* out_target) {
     (void)step;
     crowbar_out_t output = (power == 2u) ? CROWBAR_OUT_HP : CROWBAR_OUT_LP;
+    // Preserve whatever trigger the operator last applied via the
+    // engine's own CONFIGURE (e.g. the TUI's Campaign modal pins it on
+    // `crowbar` right before Start — see faultycmd-TUI app.py
+    // `_on_configure`). Rebuilding this cfg with a hardcoded
+    // CROWBAR_TRIG_IMMEDIATE every step silently discarded an
+    // operator-selected external trigger.
+    crowbar_config_t prev;
+    crowbar_campaign_get_config(&prev);
     crowbar_config_t cfg = {
-        .trigger  = CROWBAR_TRIG_IMMEDIATE,
+        .trigger  = prev.trigger,
         .output   = output,
         .delay_us = delay,
         .width_ns = width,
     };
     if (!crowbar_campaign_configure(&cfg)) {
-        *out_fire = 1;
+        *out_fire = CAMPAIGN_FIRE_CONFIGURE_ERR;
         return false;
     }
     if (!crowbar_campaign_arm()) {
-        *out_fire = 2;
+        *out_fire = CAMPAIGN_FIRE_ARM_ERR;
         return false;
     }
-    if (!crowbar_campaign_fire(CAMPAIGN_FIRE_TIMEOUT_MS)) {
-        *out_fire = 3;
+    // trigger_timeout = 0 → the engine keeps the PIO ARMED and waits on
+    // the external trigger indefinitely (crowbar_campaign tick_waiting
+    // treats 0 as "wait forever"). Crowbar has no HV cap to bleed, so
+    // holding the gate armed between the operator's edges is free — the
+    // flanco, not a timeout, fires each step. This is what fixes "only the
+    // first trigger is detected": every step now arms and waits for its
+    // own edge instead of the old 10 s window that mostly fell inside the
+    // post-fire settle gap. The sweep-level settle_ms handles inter-shot
+    // spacing; a host STOP is the abort path (polled below).
+    if (!crowbar_campaign_fire(0u)) {
+        *out_fire = CAMPAIGN_FIRE_FIRE_REJECTED;
         return false;
     }
 
-    uint32_t start = hal_now_ms();
     while (true) {
         crowbar_campaign_tick();
         crowbar_status_t st;
         crowbar_campaign_get_status(&st);
         if (st.state == CROWBAR_STATE_FIRED) {
-            *out_fire   = 0;
+            *out_fire   = CAMPAIGN_FIRE_OK;
             *out_target = (uint32_t)output; // diag echo
             break;
         }
         if (st.state == CROWBAR_STATE_ERROR) {
-            *out_fire = (uint8_t)(0x80u | (uint8_t)st.err);
+            *out_fire = (uint8_t)(CAMPAIGN_FIRE_ENGINE_ERR_FLAG | (uint8_t)st.err);
             return false;
         }
-        if ((uint32_t)(hal_now_ms() - start) > CAMPAIGN_FIRE_TIMEOUT_MS) {
-            *out_fire = 4;
-            return false;
+        if (campaign_manager_stop_pending()) {
+            // A host STOP landed on the CDC pump while we were armed,
+            // waiting on the trigger. Disarm the gate now and return
+            // cleanly; campaign_manager honors the pending stop and
+            // settles the sweep into STOPPED once we unwind. Without this
+            // the wait above would be unbounded when no edge ever comes.
+            crowbar_campaign_disarm();
+            *out_fire = CAMPAIGN_FIRE_ABORTED;
+            break;
         }
         campaign_yield_pump();
         hal_sleep_ms(1u);
@@ -1603,6 +1674,22 @@ static bool campaign_dispatch_executor(uint32_t step, const campaign_config_t* c
         *out_verify = 0xFEu;
     }
     return true;
+}
+
+// Engine teardown on sweep stop. campaign_manager calls this whenever a
+// running sweep is stopped (a host STOP over CDC, or a reentrant stop
+// honored after the in-flight step unwinds). The per-step executors arm
+// the EMFI HV cap / crowbar MOSFET on every fire and rely on the engine's
+// own post-fire teardown to disarm — but a STOP can land mid-charge /
+// mid-fire, so disarm the sweep's engine explicitly here to guarantee the
+// HV cap is bled and the engine is back at IDLE once the sweep halts.
+static void campaign_stop_hook(campaign_engine_t engine, void* user) {
+    (void)user;
+    if (engine == CAMPAIGN_ENGINE_EMFI) {
+        emfi_campaign_disarm();
+    } else {
+        crowbar_campaign_disarm();
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -2035,6 +2122,7 @@ int main(void) {
     swd_bus_lock_init();
     campaign_manager_init();
     campaign_manager_set_step_executor(campaign_dispatch_executor, NULL);
+    campaign_manager_set_stop_hook(campaign_stop_hook, NULL);
 
     bool last_arm             = false;
     bool last_pulse           = false;

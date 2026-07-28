@@ -191,6 +191,12 @@ void emfi_campaign_get_status(emfi_status_t* out) {
     *out = s_status;
 }
 
+void emfi_campaign_get_config(emfi_config_t* out) {
+    if (!out)
+        return;
+    *out = s_cfg;
+}
+
 const uint8_t* emfi_campaign_capture_buffer(void) {
     return emfi_capture_buffer();
 }

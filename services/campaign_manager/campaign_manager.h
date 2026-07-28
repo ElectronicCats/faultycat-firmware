@@ -40,6 +40,29 @@ typedef enum {
     CAMPAIGN_ERR_INTERNAL       = 5,
 } campaign_err_t;
 
+// Executor-phase status for a step's `fire_status` byte. These are the
+// executor's OWN codes for the configure→arm→charge→fire pipeline, and
+// must NOT collide with either engine's `*_err_t` (0..5) nor with the
+// `0x80 | (*_err_t)` encoding used when the engine itself enters ERROR.
+// The high range (0xE0+) keeps all three namespaces disjoint so the host
+// can decode `fire_status` unambiguously:
+//   0x00        → step fired cleanly
+//   0x80..0xBF  → engine ERROR, real `*_err_t` in the low 7 bits
+//   0xE0..0xEF  → executor phase failure (this enum)
+typedef enum {
+    CAMPAIGN_FIRE_OK             = 0x00,
+    CAMPAIGN_FIRE_CONFIGURE_ERR  = 0xE1, // engine configure() rejected the step
+    CAMPAIGN_FIRE_ARM_ERR        = 0xE2, // engine arm() rejected the step
+    CAMPAIGN_FIRE_CHARGE_TIMEOUT = 0xE3, // HV never reached CHARGED before wait bound
+    CAMPAIGN_FIRE_FIRE_REJECTED  = 0xE4, // engine fire() returned false (wrong state)
+    CAMPAIGN_FIRE_ENGINE_STUCK   = 0xE5, // engine never reached FIRED before wait bound
+    CAMPAIGN_FIRE_ABORTED        = 0xE6, // host STOP arrived while armed, waiting on trigger
+} campaign_fire_status_t;
+
+// Marker bit OR'd with a real `*_err_t` when the engine enters its ERROR
+// state, so the host can tell an engine error from an executor-phase code.
+#define CAMPAIGN_FIRE_ENGINE_ERR_FLAG 0x80u
+
 typedef struct {
     uint32_t start;
     uint32_t end;
@@ -96,10 +119,31 @@ bool campaign_manager_start(void);
 void campaign_manager_stop(void);
 void campaign_manager_tick(void);
 
+// True while a STOP has been requested reentrantly from inside a running
+// step (i.e. a host STOP that landed on the CDC pump the executor drives
+// while it blocks). A blocking executor that keeps the engine ARMED and
+// waits for an external trigger — which may never arrive — polls this so
+// it can abort the wait, disarm, and return; tick() then settles the
+// sweep into STOPPED. Without it, a trigger-armed crowbar sweep could
+// only be stopped by the trigger finally firing.
+bool campaign_manager_stop_pending(void);
+
 void campaign_manager_get_status(campaign_status_t* out);
 size_t campaign_manager_drain_results(campaign_result_t* out, size_t max_n);
 
 void campaign_manager_set_step_executor(campaign_step_executor_t fn, void* user);
+
+// Stop hook — invoked once, engine-agnostically, whenever a *running*
+// sweep settles into STOPPED: either an immediate `campaign_manager_stop()`
+// on a SWEEPING campaign, or a reentrant stop honored by `tick()` after the
+// in-flight step unwinds. Lets the app tear down / disarm the engine the
+// sweep was driving (EMFI HV cap, crowbar MOSFET) so a STOP always leaves
+// the hardware safe instead of latched armed with a charged cap. `engine`
+// is the stopped sweep's configured engine. Optional; NULL = no teardown
+// (the F9-2 default, used by the tests that predate engine wiring).
+typedef void (*campaign_stop_hook_t)(campaign_engine_t engine, void* user);
+
+void campaign_manager_set_stop_hook(campaign_stop_hook_t fn, void* user);
 
 // Default no-op executor — declared here so tests / F9-3 init can
 // reset to it explicitly.

@@ -68,3 +68,8 @@ bool crowbar_campaign_fire(uint32_t trigger_timeout_ms);
 void crowbar_campaign_disarm(void);
 void crowbar_campaign_tick(void);
 void crowbar_campaign_get_status(crowbar_status_t* out);
+// Returns the most recently applied config (all-zero / TRIG_IMMEDIATE
+// before the first configure()). Lets a caller that must rebuild the
+// config per call (e.g. the campaign sweep executor) preserve fields
+// — like `trigger` — it isn't itself sweeping.
+void crowbar_campaign_get_config(crowbar_config_t* out);

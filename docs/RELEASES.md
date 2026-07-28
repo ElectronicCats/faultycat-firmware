@@ -22,7 +22,7 @@ firmware exposes for any host tool to consume.
 
 Releases are tagged `vA.X.Y.Z`. Four numeric segments, mandatory `v`
 prefix on the git tag. Pre-release variants append a hyphen-suffix
-(`v2.2.1.0-rc1`).
+(`v2.2.1.1-rc1`).
 
 | Segment | Bumped when… |
 |---|---|
@@ -56,7 +56,7 @@ top-level CMakeLists.txt then runs
 #define FW_VERSION_MAJOR  2u
 #define FW_VERSION_MINOR  1u
 #define FW_VERSION_PATCH  0u
-#define FW_VERSION_STR    "2.2.1.0"
+#define FW_VERSION_STR    "2.2.1.1"
 #define FW_VERSION_BCD    /* packed 0xBBmp for USB bcdDevice */
 ```
 
@@ -93,7 +93,7 @@ instead of treating the trailing zeros as `0.0.0.0`.
 The text shell on the scanner CDC accepts `version` and replies:
 
 ```
-SHELL: VERSION 2.2.1.0
+SHELL: VERSION 2.2.1.1
 ```
 
 This is what the `ScannerClient` probes on connect — it never sends
@@ -109,7 +109,7 @@ line:
 ```
 ========================================
 FaultyCat v3 — F8 diag (composite scanner CDC + unified shell)
-Firmware version: 2.2.1.0
+Firmware version: 2.2.1.1
 ========================================
 ```
 

@@ -192,3 +192,9 @@ void crowbar_campaign_get_status(crowbar_status_t* out) {
         return;
     *out = s_status;
 }
+
+void crowbar_campaign_get_config(crowbar_config_t* out) {
+    if (!out)
+        return;
+    *out = s_cfg;
+}

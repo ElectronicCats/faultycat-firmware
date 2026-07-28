@@ -31,6 +31,12 @@ typedef struct {
     campaign_step_executor_t executor;
     void* executor_user;
 
+    // Engine-agnostic teardown hook, run when a running sweep stops.
+    // Set by the app to disarm whichever engine the sweep drove (EMFI
+    // HV cap / crowbar MOSFET) so STOP always leaves the hardware safe.
+    campaign_stop_hook_t stop_hook;
+    void* stop_hook_user;
+
     // Ringbuffer — single producer (campaign_manager_tick), single
     // drainer (campaign_manager_drain_results from host_proto).
     // Cooperative single-core, so plain head/tail without atomics.
@@ -38,6 +44,16 @@ typedef struct {
     uint32_t ring_head;  // write index
     uint32_t ring_tail;  // read index
     uint32_t ring_count; // 0..CAMPAIGN_RESULT_RING_DEPTH
+
+    // Reentrancy guard. A step executor is blocking (it can spin for
+    // seconds waiting on HV charge / trigger), and while it blocks the
+    // main loop keeps pumping the CDC that carries campaign commands —
+    // so a host CONFIG/START/STOP can land *inside* the executor call
+    // stack (main → tick → executor → yield_pump → cdc → proto →
+    // campaign_manager_*). `in_step` lets the control entrypoints refuse
+    // or defer such reentrant calls instead of mutating the live sweep.
+    bool in_step;
+    bool pending_stop; // reentrant stop requested mid-step; honored on return
 } cm_t;
 
 static cm_t s_cm;
@@ -152,6 +168,16 @@ size_t campaign_manager_drain_results(campaign_result_t* out, size_t max_n) {
 // State machine
 // -----------------------------------------------------------------------------
 
+// Fire the engine-teardown hook for the sweep's configured engine. Only
+// meaningful once a config has been stored — before that there's nothing
+// armed to disarm. Kept engine-agnostic: campaign_manager never includes
+// the emfi/crowbar headers; the app supplies the disarm behind this hook.
+static void invoke_stop_hook(void) {
+    if (s_cm.stop_hook != NULL && s_cm.cfg_valid) {
+        s_cm.stop_hook(s_cm.cfg.engine, s_cm.stop_hook_user);
+    }
+}
+
 void campaign_manager_init(void) {
     memset(&s_cm, 0, sizeof(s_cm));
     s_cm.state    = CAMPAIGN_STATE_IDLE;
@@ -163,9 +189,13 @@ bool campaign_manager_configure(const campaign_config_t* cfg) {
         s_cm.err = CAMPAIGN_ERR_BAD_CONFIG;
         return false;
     }
-    if (s_cm.state == CAMPAIGN_STATE_SWEEPING) {
-        // Reconfiguring mid-sweep is a programmer error — refuse.
-        s_cm.err = CAMPAIGN_ERR_BAD_CONFIG;
+    if (s_cm.in_step || s_cm.state == CAMPAIGN_STATE_SWEEPING) {
+        // Reconfiguring mid-sweep is refused. Crucially we do NOT touch
+        // s_cm.err/state here: a reentrant CONFIG arriving on the CDC pump
+        // while a blocking step executor runs would otherwise stamp
+        // BAD_CONFIG onto a perfectly valid running sweep, making STATUS
+        // report a bogus "SWEEPING + BAD_CONFIG". The refusal is signalled
+        // by the return value only — the proto layer maps it to REJECTED.
         return false;
     }
     uint32_t total = campaign_total_steps(cfg);
@@ -187,8 +217,9 @@ bool campaign_manager_start(void) {
         s_cm.err = CAMPAIGN_ERR_NOT_CONFIGURED;
         return false;
     }
-    if (s_cm.state == CAMPAIGN_STATE_SWEEPING) {
-        // Already running.
+    if (s_cm.in_step || s_cm.state == CAMPAIGN_STATE_SWEEPING) {
+        // Already running (or a reentrant start landing inside a blocking
+        // step executor — refuse without disturbing the live sweep).
         return false;
     }
     s_cm.step_n          = 0u;
@@ -204,8 +235,21 @@ bool campaign_manager_start(void) {
 }
 
 void campaign_manager_stop(void) {
+    if (s_cm.in_step) {
+        // Stop requested reentrantly while a step executor is mid-fire.
+        // Flipping state now would be clobbered when the executor returns
+        // and tick() advances/finishes the step, so defer it — tick()
+        // honors pending_stop right after the executor unwinds.
+        s_cm.pending_stop = true;
+        return;
+    }
     if (s_cm.state == CAMPAIGN_STATE_SWEEPING) {
         s_cm.state = CAMPAIGN_STATE_STOPPED;
+        // Disarm the engine now that the sweep has halted. Runs at top
+        // level (not reentrantly — the in_step branch above deferred
+        // that case to tick()), so the engine is between steps and the
+        // disarm is a clean reset back to IDLE.
+        invoke_stop_hook();
     }
 }
 
@@ -217,7 +261,16 @@ void campaign_manager_tick(void) {
         return;
     }
 
-    // Inter-step settle.
+    // Post-fire cooldown (settle_ms). This is the ONLY inter-step wait,
+    // and it is a cooldown that runs AFTER the previous step's fire
+    // (last_step_at_ms is stamped post-fire, below) and BEFORE the next
+    // step's executor arms. It deliberately does NOT gate the trigger
+    // wait: the executor arms the engine and waits for the external
+    // trigger with no blind window in front of it, so an operator edge is
+    // never dropped into a disarmed pre-arm gap. Step 0 skips this
+    // (last_step_at_ms == 0) — the sweep arms immediately on START. Size
+    // settle_ms to the target's recovery time; the trigger itself paces
+    // the shots, so it is not a shot-spacing knob.
     if (s_cm.cfg.settle_ms > 0u && s_cm.last_step_at_ms != 0u) {
         uint32_t elapsed = (uint32_t)(hal_now_ms() - s_cm.last_step_at_ms);
         if (elapsed < s_cm.cfg.settle_ms)
@@ -234,10 +287,15 @@ void campaign_manager_tick(void) {
     uint8_t fire_status   = 0u;
     uint8_t verify_status = 0u;
     uint32_t target_state = 0u;
-    bool ok               = (s_cm.executor != NULL)
-                                ? s_cm.executor(s_cm.step_n, &s_cm.cfg, delay, width, power, &fire_status,
-                                                &verify_status, &target_state, s_cm.executor_user)
-                                : false;
+    // Mark the reentrancy guard across the (blocking) executor call so a
+    // host CONFIG/START/STOP arriving on the CDC pump mid-fire can't mutate
+    // the live sweep. See cm_t.in_step.
+    s_cm.in_step = true;
+    bool ok      = (s_cm.executor != NULL)
+                       ? s_cm.executor(s_cm.step_n, &s_cm.cfg, delay, width, power, &fire_status,
+                                       &verify_status, &target_state, s_cm.executor_user)
+                       : false;
+    s_cm.in_step = false;
 
     campaign_result_t r = {
         .step_n        = s_cm.step_n,
@@ -255,8 +313,22 @@ void campaign_manager_tick(void) {
         // Step executor reported failure. Record the result, mark
         // ERROR, and stop. F9-3's adapter will surface engine-specific
         // status codes via `fire_status` so the host can diagnose.
-        s_cm.err   = CAMPAIGN_ERR_STEP_FAILED;
-        s_cm.state = CAMPAIGN_STATE_ERROR;
+        s_cm.err          = CAMPAIGN_ERR_STEP_FAILED;
+        s_cm.state        = CAMPAIGN_STATE_ERROR;
+        s_cm.pending_stop = false;
+        return;
+    }
+
+    if (s_cm.pending_stop) {
+        // A stop arrived (reentrantly) while this step was firing. The
+        // step completed cleanly and its result is recorded; honor the
+        // stop now instead of advancing to the next step.
+        s_cm.pending_stop = false;
+        s_cm.state        = CAMPAIGN_STATE_STOPPED;
+        // The reentrant STOP was deferred here; the step's fire path has
+        // now fully unwound (its own post-fire teardown already bled the
+        // cap), so disarm the engine to guarantee it's back at IDLE.
+        invoke_stop_hook();
         return;
     }
 
@@ -265,6 +337,14 @@ void campaign_manager_tick(void) {
     if (s_cm.step_n >= s_cm.total_steps) {
         s_cm.state = CAMPAIGN_STATE_DONE;
     }
+}
+
+bool campaign_manager_stop_pending(void) {
+    // Reflects the reentrant-stop flag set by campaign_manager_stop() when
+    // it lands mid-step. A blocking executor polls this to abort an
+    // otherwise-unbounded armed trigger wait. tick() clears/honors the flag
+    // once the executor returns.
+    return s_cm.pending_stop;
 }
 
 void campaign_manager_get_status(campaign_status_t* out) {
@@ -281,4 +361,9 @@ void campaign_manager_get_status(campaign_status_t* out) {
 void campaign_manager_set_step_executor(campaign_step_executor_t fn, void* user) {
     s_cm.executor      = (fn != NULL) ? fn : campaign_noop_executor;
     s_cm.executor_user = user;
+}
+
+void campaign_manager_set_stop_hook(campaign_stop_hook_t fn, void* user) {
+    s_cm.stop_hook      = fn;
+    s_cm.stop_hook_user = user;
 }
