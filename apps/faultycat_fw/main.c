@@ -178,6 +178,7 @@ static void shell_help(void) {
     shell_print("SHELL: commands —\n");
     shell_print("SHELL:   ? | help\n");
     shell_print("SHELL:   version                                       report firmware version\n");
+    shell_print("SHELL:   reset <gp> [<ms>]                             pulse target reset (active-low)\n");
     shell_print("SHELL: --- Pinout scan ---\n");
     shell_print("SHELL:   scan swd  [<targetsel_hex>]                  P(8,2)=56 perms\n");
     shell_print("SHELL:   scan i2c                                    P(8,2)=56 perms\n");
@@ -1825,6 +1826,25 @@ static FW_WIP_UNUSED void process_jtag_subcmd(int argc, char** argv) {
     }
 }
 
+// Pulse a target reset line (active-low): drive GP<gp> LOW for <ms>, then
+// release to hi-Z so the target's own pull-up recovers it. A plain GPIO
+// pulse — deliberately independent of the WIP SWD stack, so it works with
+// nothing but a wire to the target's nRST. Host drives this between glitch
+// attempts to start each try from a clean state.
+static void cmd_target_reset(int argc, char** argv) {
+    if (argc < 2) {
+        shell_print("RESET: ERR usage: reset <gp> [<ms>]\n");
+        return;
+    }
+    uint8_t gp   = (uint8_t)strtoul(argv[1], NULL, 0);
+    uint32_t ms  = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 10u;
+    hal_gpio_init(gp, HAL_GPIO_DIR_OUT);
+    hal_gpio_put(gp, false);            // assert reset (active-low)
+    hal_sleep_ms(ms);
+    hal_gpio_init(gp, HAL_GPIO_DIR_IN); // release: hi-Z, target pull-up recovers
+    shell_printf("RESET: OK pulsed GP%u low %lums\n", gp, (unsigned long)ms);
+}
+
 static void process_shell_line(char* line) {
     // Tokenize on whitespace; up to 8 tokens — `jtag init <tdi> <tdo>
     // <tms> <tck> <trst>` is the longest at 7 tokens.
@@ -1873,6 +1893,10 @@ static void process_shell_line(char* line) {
     }
     if (!strcmp(argv[0], "i2c")) {
         process_i2c_subcmd(argc, argv);
+        return;
+    }
+    if (!strcmp(argv[0], "reset")) {
+        cmd_target_reset(argc, argv);
         return;
     }
     if (!strcmp(argv[0], "la")) {
