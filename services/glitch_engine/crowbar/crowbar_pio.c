@@ -175,6 +175,9 @@ bool crowbar_pio_load(const crowbar_pio_params_t* p) {
 bool crowbar_pio_start(void) {
     if (!s_claimed || !s_loaded)
         return false;
+    // FIFO order must match pio_glitch_build_program: [repeat-1, delay, width].
+    // Crowbar stays single-pulse for now (repeat = 1 -> push 0).
+    hal_pio_sm_put_blocking(s_pio, s_sm, 0u);
     hal_pio_sm_put_blocking(s_pio, s_sm, s_delay_ticks);
     hal_pio_sm_put_blocking(s_pio, s_sm, s_width_ticks);
     hal_pio_sm_set_enabled(s_pio, s_sm, true);

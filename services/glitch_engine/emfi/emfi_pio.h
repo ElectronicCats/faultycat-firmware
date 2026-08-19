@@ -30,8 +30,9 @@ typedef enum {
 
 typedef struct {
     emfi_trig_t trigger;
-    uint32_t delay_us; // 0..1_000_000
+    uint32_t delay_us; // 0..1_000_000 (pre-each-pulse gap when repeat > 1)
     uint32_t width_us; // 1..50 (mirrors EMFI_PULSE_MIN/MAX)
+    uint32_t repeat;   // pulses per trigger, >= 1 (1 = single pulse)
 } emfi_pio_params_t;
 
 // One-time init. Claims pio0/SM0 and prepares the instance. Returns
