@@ -48,6 +48,7 @@ static crowbar_out_t s_out   = CROWBAR_OUT_NONE;
 
 static uint32_t s_delay_ticks;
 static uint32_t s_width_ticks;
+static uint32_t s_repeat = 1u;
 
 static uint32_t pin_for_output(crowbar_out_t out) {
     switch (out) {
@@ -169,6 +170,7 @@ bool crowbar_pio_load(const crowbar_pio_params_t* p) {
     s_width_ticks = (p->width_ns + CROWBAR_PIO_NS_PER_TICK - 1u) / CROWBAR_PIO_NS_PER_TICK;
     if (s_width_ticks == 0u)
         s_width_ticks = 1u;
+    s_repeat = (p->repeat > 0u) ? p->repeat : 1u;
     return true;
 }
 
@@ -176,8 +178,7 @@ bool crowbar_pio_start(void) {
     if (!s_claimed || !s_loaded)
         return false;
     // FIFO order must match pio_glitch_build_program: [repeat-1, delay, width].
-    // Crowbar stays single-pulse for now (repeat = 1 -> push 0).
-    hal_pio_sm_put_blocking(s_pio, s_sm, 0u);
+    hal_pio_sm_put_blocking(s_pio, s_sm, s_repeat - 1u);
     hal_pio_sm_put_blocking(s_pio, s_sm, s_delay_ticks);
     hal_pio_sm_put_blocking(s_pio, s_sm, s_width_ticks);
     hal_pio_sm_set_enabled(s_pio, s_sm, true);

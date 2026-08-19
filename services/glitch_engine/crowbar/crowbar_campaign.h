@@ -29,6 +29,7 @@ typedef struct {
     crowbar_out_t output; // CROWBAR_OUT_LP or CROWBAR_OUT_HP
     uint32_t delay_us;    // 0..CROWBAR_PIO_DELAY_US_MAX
     uint32_t width_ns;    // CROWBAR_PIO_WIDTH_NS_MIN..MAX
+    uint32_t repeat;      // pulses per trigger, >= 1 (1 = single pulse)
 } crowbar_config_t;
 
 typedef enum {

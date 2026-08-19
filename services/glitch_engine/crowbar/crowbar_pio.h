@@ -63,8 +63,9 @@ typedef enum {
 typedef struct {
     crowbar_trig_t trigger;
     crowbar_out_t output; // which gate the PIO drives this fire
-    uint32_t delay_us;    // 0..CROWBAR_PIO_DELAY_US_MAX
+    uint32_t delay_us;    // 0..CROWBAR_PIO_DELAY_US_MAX (pre-each-pulse gap if repeat > 1)
     uint32_t width_ns;    // CROWBAR_PIO_WIDTH_NS_MIN..MAX
+    uint32_t repeat;      // pulses per trigger, >= 1 (1 = single pulse)
 } crowbar_pio_params_t;
 
 // One-time init. Claims pio0/SM1. Returns false if SM is already

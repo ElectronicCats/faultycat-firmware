@@ -80,7 +80,11 @@ bool crowbar_campaign_init(void) {
 bool crowbar_campaign_configure(const crowbar_config_t* cfg) {
     if (!validate_cfg(cfg))
         return false;
-    s_cfg       = *cfg;
+    if (cfg->repeat > 8192u) // mirror ChipWhisperer's glitch.repeat ceiling
+        return false;
+    s_cfg = *cfg;
+    if (s_cfg.repeat == 0u)  // 0 from a pre-repeat host -> single pulse
+        s_cfg.repeat = 1u;
     s_cfg_valid = true;
     // A fresh configure clears any stale ERROR so the operator does
     // not need to disarm explicitly to retry with new params.
@@ -135,6 +139,7 @@ bool crowbar_campaign_fire(uint32_t trigger_timeout_ms) {
         .output   = s_cfg.output,
         .delay_us = s_cfg.delay_us,
         .width_ns = s_cfg.width_ns,
+        .repeat   = (s_cfg.repeat > 0u) ? s_cfg.repeat : 1u,
     };
     if (!crowbar_pio_load(&pp)) {
         enter_error(CROWBAR_ERR_PIO_FAULT);
