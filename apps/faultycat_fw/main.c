@@ -1827,10 +1827,17 @@ static FW_WIP_UNUSED void process_jtag_subcmd(int argc, char** argv) {
 }
 
 // Pulse a target reset line (active-low): drive GP<gp> LOW for <ms>, then
-// release to hi-Z so the target's own pull-up recovers it. A plain GPIO
-// pulse — deliberately independent of the WIP SWD stack, so it works with
-// nothing but a wire to the target's nRST. Host drives this between glitch
-// attempts to start each try from a clean state.
+// drive it HIGH briefly before releasing to hi-Z. A plain GPIO pulse —
+// deliberately independent of the WIP SWD stack, so it works with nothing but
+// a wire to the target's nRST. Host drives this between glitch attempts to
+// start each try from a clean state.
+//
+// Why drive HIGH before hi-Z: the scanner header sits behind a TXS0108 level
+// shifter whose one-shot HOLDS the last driven level. If we released straight
+// from LOW to hi-Z the shifter kept nRST held low and the target hung in reset.
+// Driving the released (HIGH) level first latches the shifter high, so the
+// target actually runs. (Needs the shifter's VREF at the target's Vcc — e.g.
+// 5 V for an Arduino Uno — so the HIGH reaches the target's reset threshold.)
 static void cmd_target_reset(int argc, char** argv) {
     if (argc < 2) {
         shell_print("RESET: ERR usage: reset <gp> [<ms>]\n");
@@ -1841,7 +1848,9 @@ static void cmd_target_reset(int argc, char** argv) {
     hal_gpio_init(gp, HAL_GPIO_DIR_OUT);
     hal_gpio_put(gp, false);            // assert reset (active-low)
     hal_sleep_ms(ms);
-    hal_gpio_init(gp, HAL_GPIO_DIR_IN); // release: hi-Z, target pull-up recovers
+    hal_gpio_put(gp, true);             // drive released HIGH — latch the shifter
+    hal_sleep_ms(1);                    // high so the target leaves reset for real
+    hal_gpio_init(gp, HAL_GPIO_DIR_IN); // release: hi-Z (shifter now holds HIGH)
     shell_printf("RESET: OK pulsed GP%u low %lums\n", gp, (unsigned long)ms);
 }
 
