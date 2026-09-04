@@ -108,22 +108,22 @@ static inline uint32_t pio_glitch_build_program(uint16_t* prog, uint8_t trig, ui
     // pre-each-pulse gap, so repeat==1 is byte-identical to the old single
     // pulse. Registers used: X (counter), Y (scratch countdown), ISR
     // (delay), OSR (width).
-    prog[len++] = PIO_OP_PULL_BLOCK; // OSR = repeat-1
-    prog[len++] = PIO_OP_OUT_X_32;   // X   = repeat-1
-    prog[len++] = PIO_OP_PULL_BLOCK; // OSR = delay_ticks
-    prog[len++] = PIO_OP_OUT_ISR_32; // ISR = delay_ticks
-    prog[len++] = PIO_OP_PULL_BLOCK; // OSR = width_ticks (kept in OSR)
+    prog[len++] = PIO_OP_PULL_BLOCK;                           // OSR = repeat-1
+    prog[len++] = PIO_OP_OUT_X_32;                             // X   = repeat-1
+    prog[len++] = PIO_OP_PULL_BLOCK;                           // OSR = delay_ticks
+    prog[len++] = PIO_OP_OUT_ISR_32;                           // ISR = delay_ticks
+    prog[len++] = PIO_OP_PULL_BLOCK;                           // OSR = width_ticks (kept in OSR)
     len += pio_glitch_compile_trigger_block(&prog[len], trig); // wait for trigger once
-    uint8_t pulse_addr     = (uint8_t)len;
-    prog[len++]            = PIO_OP_MOV_Y_ISR; // Y = delay
-    uint8_t delay_loop     = (uint8_t)len;
-    prog[len++]            = pio_glitch_op_jmp_y_dec(delay_loop);
-    prog[len++]            = PIO_OP_MOV_Y_OSR; // Y = width
-    prog[len++]            = PIO_OP_SET_PIN_HIGH;
-    uint8_t hold_loop      = (uint8_t)len;
-    prog[len++]            = pio_glitch_op_jmp_y_dec(hold_loop);
-    prog[len++]            = PIO_OP_SET_PIN_LOW;
-    prog[len++]            = pio_glitch_op_jmp_x_dec(pulse_addr); // repeat
-    prog[len++]            = irq_op;
+    uint8_t pulse_addr = (uint8_t)len;
+    prog[len++]        = PIO_OP_MOV_Y_ISR; // Y = delay
+    uint8_t delay_loop = (uint8_t)len;
+    prog[len++]        = pio_glitch_op_jmp_y_dec(delay_loop);
+    prog[len++]        = PIO_OP_MOV_Y_OSR; // Y = width
+    prog[len++]        = PIO_OP_SET_PIN_HIGH;
+    uint8_t hold_loop  = (uint8_t)len;
+    prog[len++]        = pio_glitch_op_jmp_y_dec(hold_loop);
+    prog[len++]        = PIO_OP_SET_PIN_LOW;
+    prog[len++]        = pio_glitch_op_jmp_x_dec(pulse_addr); // repeat
+    prog[len++]        = irq_op;
     return len;
 }

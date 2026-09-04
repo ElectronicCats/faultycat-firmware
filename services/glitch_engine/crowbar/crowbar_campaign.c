@@ -83,7 +83,7 @@ bool crowbar_campaign_configure(const crowbar_config_t* cfg) {
     if (cfg->repeat > 8192u) // mirror ChipWhisperer's glitch.repeat ceiling
         return false;
     s_cfg = *cfg;
-    if (s_cfg.repeat == 0u)  // 0 from a pre-repeat host -> single pulse
+    if (s_cfg.repeat == 0u) // 0 from a pre-repeat host -> single pulse
         s_cfg.repeat = 1u;
     s_cfg_valid = true;
     // A fresh configure clears any stale ERROR so the operator does

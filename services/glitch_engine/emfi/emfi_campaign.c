@@ -58,8 +58,8 @@ bool emfi_campaign_configure(const emfi_config_t* cfg) {
         return false;
     if (cfg->repeat > 8192u) // mirror ChipWhisperer's glitch.repeat ceiling
         return false;
-    s_cfg        = *cfg;
-    if (s_cfg.repeat == 0u)  // 0 from a pre-repeat host -> single pulse
+    s_cfg = *cfg;
+    if (s_cfg.repeat == 0u) // 0 from a pre-repeat host -> single pulse
         s_cfg.repeat = 1u;
     s_cfg_valid = true;
     // Clearing any error from a prior run lets a fresh configure

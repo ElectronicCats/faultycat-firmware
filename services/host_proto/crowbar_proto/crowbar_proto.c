@@ -105,9 +105,9 @@ size_t crowbar_proto_dispatch(uint8_t* reply, size_t reply_cap) {
                 .width_ns = unpack_u32_le(&s_frame_payload[6]),
                 // Optional 5th u32 (multipulse): pulses per trigger. Absent in
                 // pre-multipulse hosts (10-byte payload) -> single pulse.
-                .repeat   = (s_frame_len >= 1u + 1u + 4u + 4u + 4u)
-                                ? unpack_u32_le(&s_frame_payload[10])
-                                : 1u,
+                .repeat = (s_frame_len >= 1u + 1u + 4u + 4u + 4u)
+                              ? unpack_u32_le(&s_frame_payload[10])
+                              : 1u,
             };
             if (!crowbar_campaign_configure(&c))
                 err = CROWBAR_ERR_BAD_CONFIG;
