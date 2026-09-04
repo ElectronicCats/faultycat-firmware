@@ -178,7 +178,8 @@ static void shell_help(void) {
     shell_print("SHELL: commands —\n");
     shell_print("SHELL:   ? | help\n");
     shell_print("SHELL:   version                                       report firmware version\n");
-    shell_print("SHELL:   reset <gp> [<ms>]                             pulse target reset (active-low)\n");
+    shell_print(
+        "SHELL:   reset <gp> [<ms>]                             pulse target reset (active-low)\n");
     shell_print("SHELL: --- Pinout scan ---\n");
     shell_print("SHELL:   scan swd  [<targetsel_hex>]                  P(8,2)=56 perms\n");
     shell_print("SHELL:   scan i2c                                    P(8,2)=56 perms\n");
@@ -1843,10 +1844,10 @@ static void cmd_target_reset(int argc, char** argv) {
         shell_print("RESET: ERR usage: reset <gp> [<ms>]\n");
         return;
     }
-    uint8_t gp   = (uint8_t)strtoul(argv[1], NULL, 0);
-    uint32_t ms  = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 10u;
+    uint8_t gp  = (uint8_t)strtoul(argv[1], NULL, 0);
+    uint32_t ms = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 10u;
     hal_gpio_init(gp, HAL_GPIO_DIR_OUT);
-    hal_gpio_put(gp, false);            // assert reset (active-low)
+    hal_gpio_put(gp, false); // assert reset (active-low)
     hal_sleep_ms(ms);
     hal_gpio_put(gp, true);             // drive released HIGH — latch the shifter
     hal_sleep_ms(1);                    // high so the target leaves reset for real
