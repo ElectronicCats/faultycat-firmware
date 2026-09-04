@@ -31,6 +31,10 @@
 // ---------------------------------------------------------------------------
 #define PIO_OP_PULL_BLOCK      0x80A0u
 #define PIO_OP_OUT_Y_32        0x6040u
+#define PIO_OP_OUT_X_32        0x6020u // OUT X, 32  (dest X = 1)
+#define PIO_OP_OUT_ISR_32      0x60C0u // OUT ISR, 32 (dest ISR = 6)
+#define PIO_OP_MOV_Y_ISR       0xA046u // MOV Y, ISR (non-destructive reload)
+#define PIO_OP_MOV_Y_OSR       0xA047u // MOV Y, OSR (non-destructive reload)
 #define PIO_OP_WAIT_0_PIN0     0x2020u
 #define PIO_OP_WAIT_1_PIN0     0x20A0u
 #define PIO_OP_SET_PIN_HIGH    0xE001u
@@ -39,7 +43,11 @@
 #define PIO_OP_IRQ(n)          ((uint16_t)(0xC000u | ((n) & 0x7u)))
 
 static inline uint16_t pio_glitch_op_jmp_y_dec(uint8_t addr) {
-    return (uint16_t)(0x0080u | (addr & 0x1Fu));
+    return (uint16_t)(0x0080u | (addr & 0x1Fu)); // JMP Y--, addr (cond 0b100)
+}
+
+static inline uint16_t pio_glitch_op_jmp_x_dec(uint8_t addr) {
+    return (uint16_t)(0x0040u | (addr & 0x1Fu)); // JMP X--, addr (cond 0b010)
 }
 
 // Trigger polarity values shared by emfi_trig_t and crowbar_trig_t — both
@@ -93,17 +101,29 @@ static inline uint32_t pio_glitch_build_program(uint16_t* prog, uint8_t trig, ui
     uint32_t len = 0;
     if (with_pindir_setup)
         prog[len++] = PIO_OP_SET_PINDIRS_OUT;
-    prog[len++] = PIO_OP_PULL_BLOCK;
-    prog[len++] = PIO_OP_OUT_Y_32;
-    len += pio_glitch_compile_trigger_block(&prog[len], trig);
-    uint8_t delay_loop_addr = (uint8_t)len;
-    prog[len++]             = pio_glitch_op_jmp_y_dec(delay_loop_addr);
-    prog[len++]             = PIO_OP_PULL_BLOCK;
-    prog[len++]             = PIO_OP_OUT_Y_32;
-    prog[len++]             = PIO_OP_SET_PIN_HIGH;
-    uint8_t hold_loop_addr  = (uint8_t)len;
-    prog[len++]             = pio_glitch_op_jmp_y_dec(hold_loop_addr);
-    prog[len++]             = PIO_OP_SET_PIN_LOW;
-    prog[len++]             = irq_op;
+    // Multi-pulse: FIFO order is [repeat-1, delay_ticks, width_ticks].
+    // repeat-1 -> X (loop counter); delay -> ISR and width -> OSR, both
+    // re-read every pulse with MOV (which does NOT consume them). The
+    // sequence is  trigger -> (delay -> pulse) x repeat  — delay is the
+    // pre-each-pulse gap, so repeat==1 is byte-identical to the old single
+    // pulse. Registers used: X (counter), Y (scratch countdown), ISR
+    // (delay), OSR (width).
+    prog[len++] = PIO_OP_PULL_BLOCK;                           // OSR = repeat-1
+    prog[len++] = PIO_OP_OUT_X_32;                             // X   = repeat-1
+    prog[len++] = PIO_OP_PULL_BLOCK;                           // OSR = delay_ticks
+    prog[len++] = PIO_OP_OUT_ISR_32;                           // ISR = delay_ticks
+    prog[len++] = PIO_OP_PULL_BLOCK;                           // OSR = width_ticks (kept in OSR)
+    len += pio_glitch_compile_trigger_block(&prog[len], trig); // wait for trigger once
+    uint8_t pulse_addr = (uint8_t)len;
+    prog[len++]        = PIO_OP_MOV_Y_ISR; // Y = delay
+    uint8_t delay_loop = (uint8_t)len;
+    prog[len++]        = pio_glitch_op_jmp_y_dec(delay_loop);
+    prog[len++]        = PIO_OP_MOV_Y_OSR; // Y = width
+    prog[len++]        = PIO_OP_SET_PIN_HIGH;
+    uint8_t hold_loop  = (uint8_t)len;
+    prog[len++]        = pio_glitch_op_jmp_y_dec(hold_loop);
+    prog[len++]        = PIO_OP_SET_PIN_LOW;
+    prog[len++]        = pio_glitch_op_jmp_x_dec(pulse_addr); // repeat
+    prog[len++]        = irq_op;
     return len;
 }

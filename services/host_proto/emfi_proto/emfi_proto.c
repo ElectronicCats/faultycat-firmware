@@ -89,6 +89,11 @@ size_t emfi_proto_dispatch(uint8_t* reply, size_t reply_cap) {
                 .delay_us          = unpack_u32_le(&s_frame_payload[1]),
                 .width_us          = unpack_u32_le(&s_frame_payload[5]),
                 .charge_timeout_ms = unpack_u32_le(&s_frame_payload[9]),
+                // Optional 5th u32 (F-multipulse): pulses per trigger. Absent
+                // in pre-multipulse hosts (13-byte payload) -> single pulse.
+                .repeat = (s_frame_len >= 1u + 4u + 4u + 4u + 4u)
+                              ? unpack_u32_le(&s_frame_payload[13])
+                              : 1u,
             };
             if (!emfi_campaign_configure(&c))
                 err = EMFI_ERR_BAD_CONFIG;

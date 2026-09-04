@@ -56,7 +56,11 @@ bool emfi_campaign_configure(const emfi_config_t* cfg) {
         return false;
     if (cfg->delay_us > 1000000u)
         return false;
-    s_cfg       = *cfg;
+    if (cfg->repeat > 8192u) // mirror ChipWhisperer's glitch.repeat ceiling
+        return false;
+    s_cfg = *cfg;
+    if (s_cfg.repeat == 0u) // 0 from a pre-repeat host -> single pulse
+        s_cfg.repeat = 1u;
     s_cfg_valid = true;
     // Clearing any error from a prior run lets a fresh configure
     // drop the service back into IDLE.
@@ -105,6 +109,7 @@ bool emfi_campaign_fire(uint32_t trigger_timeout_ms) {
         .trigger  = s_cfg.trigger,
         .delay_us = s_cfg.delay_us,
         .width_us = s_cfg.width_us,
+        .repeat   = s_cfg.repeat,
     };
     if (!emfi_pio_load(&pp)) {
         enter_error(EMFI_ERR_PIO_FAULT);

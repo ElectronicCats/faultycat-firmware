@@ -26,6 +26,7 @@ static bool s_loaded         = false;
 
 static uint32_t s_delay_ticks;
 static uint32_t s_width_ticks;
+static uint32_t s_repeat = 1u;
 
 static void build_program(const emfi_pio_params_t* p) {
     s_prog_len = pio_glitch_build_program(s_prog, p->trigger, PIO_OP_IRQ(0), false);
@@ -106,12 +107,15 @@ bool emfi_pio_load(const emfi_pio_params_t* p) {
     // program reads delay first, then width, in that order.
     s_delay_ticks = p->delay_us * EMFI_PIO_TICKS_PER_US;
     s_width_ticks = p->width_us * EMFI_PIO_TICKS_PER_US;
+    s_repeat      = (p->repeat > 0u) ? p->repeat : 1u;
     return true;
 }
 
 bool emfi_pio_start(void) {
     if (!s_claimed || !s_loaded)
         return false;
+    // FIFO order must match pio_glitch_build_program: [repeat-1, delay, width].
+    hal_pio_sm_put_blocking(s_pio, s_sm, s_repeat - 1u);
     hal_pio_sm_put_blocking(s_pio, s_sm, s_delay_ticks);
     hal_pio_sm_put_blocking(s_pio, s_sm, s_width_ticks);
     hal_pio_sm_set_enabled(s_pio, s_sm, true);

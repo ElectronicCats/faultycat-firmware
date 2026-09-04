@@ -26,6 +26,7 @@ typedef struct {
     uint32_t delay_us;
     uint32_t width_us;
     uint32_t charge_timeout_ms; // 0 = wait up to hv_charger auto-disarm (60 s)
+    uint32_t repeat;            // pulses per trigger, >= 1 (1 = single pulse)
 } emfi_config_t;
 
 typedef enum {

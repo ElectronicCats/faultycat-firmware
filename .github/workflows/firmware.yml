@@ -2,7 +2,6 @@ name: firmware
 
 on:
   push:
-    branches: [ "rewrite/v3" ]
     paths-ignore:
       - "docs/**"
       - "Hardware/**"
