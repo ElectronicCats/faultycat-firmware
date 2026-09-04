@@ -96,10 +96,10 @@ static void test_load_immediate_has_no_trigger_block(void) {
                               .width_ns = 200u};
     TEST_ASSERT_TRUE(crowbar_pio_load(&p));
     // 1 (SET PINDIRS — see crowbar_pio.c build_program note) +
-    // 2 (delay setup) + 0 (trigger) + 1 (delay loop) +
-    // 2 (width setup) + 1 (SET high) + 1 (hold loop) +
-    // 1 (SET low) + 1 (IRQ) = 10.
-    TEST_ASSERT_EQUAL_UINT32(10u, hal_fake_pio_insts[0].program.length);
+    // 3 (repeat setup) + 2 (delay setup) + 0 (trigger) + 1 (delay loop) +
+    // 2 (width setup, kept in OSR) + 1 (SET high) + 1 (hold loop) +
+    // 1 (SET low) + 1 (JMP X-- repeat) + 1 (IRQ) = 14.
+    TEST_ASSERT_EQUAL_UINT32(14u, hal_fake_pio_insts[0].program.length);
 }
 
 static void test_load_rising_edge_inserts_two_waits(void) {
@@ -109,11 +109,11 @@ static void test_load_rising_edge_inserts_two_waits(void) {
                               .delay_us = 1u,
                               .width_ns = 200u};
     TEST_ASSERT_TRUE(crowbar_pio_load(&p));
-    TEST_ASSERT_EQUAL_UINT32(12u, hal_fake_pio_insts[0].program.length);
-    // Trigger block starts at index 3: [0]=SET PINDIRS, [1]=PULL,
-    // [2]=OUT Y, [3..]=trigger.
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[3]);
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[4]);
+    TEST_ASSERT_EQUAL_UINT32(16u, hal_fake_pio_insts[0].program.length);
+    // Trigger block starts at index 6: [0]=SET PINDIRS, [1..3]=repeat
+    // setup, [4..5]=delay setup, [6..]=trigger.
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[6]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[7]);
 }
 
 static void test_load_falling_edge_inserts_two_waits(void) {
@@ -123,10 +123,10 @@ static void test_load_falling_edge_inserts_two_waits(void) {
                               .delay_us = 1u,
                               .width_ns = 200u};
     TEST_ASSERT_TRUE(crowbar_pio_load(&p));
-    TEST_ASSERT_EQUAL_UINT32(12u, hal_fake_pio_insts[0].program.length);
+    TEST_ASSERT_EQUAL_UINT32(16u, hal_fake_pio_insts[0].program.length);
     // FALLING is `WAIT 1, WAIT 0` — inverse of RISING.
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[3]);
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[4]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[6]);
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[7]);
 }
 
 static void test_load_pulse_positive_inserts_three_waits(void) {
@@ -136,11 +136,11 @@ static void test_load_pulse_positive_inserts_three_waits(void) {
                               .delay_us = 1u,
                               .width_ns = 200u};
     TEST_ASSERT_TRUE(crowbar_pio_load(&p));
-    TEST_ASSERT_EQUAL_UINT32(13u, hal_fake_pio_insts[0].program.length);
+    TEST_ASSERT_EQUAL_UINT32(17u, hal_fake_pio_insts[0].program.length);
     // PULSE_POS is `WAIT 0, WAIT 1, WAIT 0` (LOW→HIGH→LOW pulse).
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[3]);
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[4]);
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[5]);
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[6]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[7]);
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[8]);
 }
 
 static void test_load_pulse_negative_inserts_three_waits(void) {
@@ -150,11 +150,11 @@ static void test_load_pulse_negative_inserts_three_waits(void) {
                               .delay_us = 1u,
                               .width_ns = 200u};
     TEST_ASSERT_TRUE(crowbar_pio_load(&p));
-    TEST_ASSERT_EQUAL_UINT32(13u, hal_fake_pio_insts[0].program.length);
+    TEST_ASSERT_EQUAL_UINT32(17u, hal_fake_pio_insts[0].program.length);
     // PULSE_NEG is `WAIT 1, WAIT 0, WAIT 1` — inverse of PULSE_POS.
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[3]);
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[4]);
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[5]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[6]);
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[7]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[8]);
 }
 
 static void test_load_lp_binds_gp16_to_pio(void) {
@@ -213,10 +213,12 @@ static void test_start_pushes_delay_then_width_ticks(void) {
                               .width_ns = 400u};
     crowbar_pio_load(&p);
     TEST_ASSERT_TRUE(crowbar_pio_start());
-    TEST_ASSERT_EQUAL_UINT32(2u, hal_fake_pio_insts[0].sm[1].tx_count);
-    TEST_ASSERT_EQUAL_UINT32(10u * 125u, hal_fake_pio_insts[0].sm[1].tx_fifo[0]);
+    // FIFO order is [repeat-1, delay, width]; single pulse -> repeat-1 = 0.
+    TEST_ASSERT_EQUAL_UINT32(3u, hal_fake_pio_insts[0].sm[1].tx_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, hal_fake_pio_insts[0].sm[1].tx_fifo[0]);
+    TEST_ASSERT_EQUAL_UINT32(10u * 125u, hal_fake_pio_insts[0].sm[1].tx_fifo[1]);
     // 400 ns / 8 ns per tick = 50 ticks.
-    TEST_ASSERT_EQUAL_UINT32(50u, hal_fake_pio_insts[0].sm[1].tx_fifo[1]);
+    TEST_ASSERT_EQUAL_UINT32(50u, hal_fake_pio_insts[0].sm[1].tx_fifo[2]);
     TEST_ASSERT_TRUE(hal_fake_pio_insts[0].sm[1].enabled);
 }
 
@@ -229,7 +231,7 @@ static void test_start_width_rounds_up_for_fractional_tick(void) {
     crowbar_pio_load(&p);
     crowbar_pio_start();
     // 9 ns rounds up to 2 ticks (16 ns) — never floors to 1.
-    TEST_ASSERT_EQUAL_UINT32(2u, hal_fake_pio_insts[0].sm[1].tx_fifo[1]);
+    TEST_ASSERT_EQUAL_UINT32(2u, hal_fake_pio_insts[0].sm[1].tx_fifo[2]);
 }
 
 static void test_start_width_at_min_is_one_tick(void) {
@@ -240,7 +242,7 @@ static void test_start_width_at_min_is_one_tick(void) {
                               .width_ns = 8u};
     crowbar_pio_load(&p);
     crowbar_pio_start();
-    TEST_ASSERT_EQUAL_UINT32(1u, hal_fake_pio_insts[0].sm[1].tx_fifo[1]);
+    TEST_ASSERT_EQUAL_UINT32(1u, hal_fake_pio_insts[0].sm[1].tx_fifo[2]);
 }
 
 static void test_is_done_polls_irq1(void) {

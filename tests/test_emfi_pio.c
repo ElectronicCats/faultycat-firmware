@@ -67,43 +67,44 @@ static void test_load_immediate_has_no_trigger_block(void) {
     emfi_pio_init();
     emfi_pio_params_t p = {.trigger = EMFI_TRIG_IMMEDIATE, .delay_us = 1, .width_us = 5};
     TEST_ASSERT_TRUE(emfi_pio_load(&p));
-    // Expected program length: 2 (setup delay) + 0 (trigger) + 1 (delay loop)
-    // + 2 (setup width) + 1 (SET high) + 1 (hold loop) + 1 (SET low)
-    // + 1 (IRQ) = 9.
-    TEST_ASSERT_EQUAL_UINT32(9u, hal_fake_pio_insts[0].program.length);
+    // Expected program length: 3 (repeat setup) + 2 (delay setup) + 0 (trigger)
+    // + 1 (delay loop) + 2 (width setup, kept in OSR) + 1 (SET high)
+    // + 1 (hold loop) + 1 (SET low) + 1 (JMP X-- repeat) + 1 (IRQ) = 13.
+    TEST_ASSERT_EQUAL_UINT32(13u, hal_fake_pio_insts[0].program.length);
 }
 
 static void test_load_rising_edge_inserts_two_waits(void) {
     emfi_pio_init();
     emfi_pio_params_t p = {.trigger = EMFI_TRIG_EXT_RISING, .delay_us = 1, .width_us = 5};
     TEST_ASSERT_TRUE(emfi_pio_load(&p));
-    // 9 + 2 = 11
-    TEST_ASSERT_EQUAL_UINT32(11u, hal_fake_pio_insts[0].program.length);
-    // Instructions at offset 2, 3 are WAIT_0, WAIT_1.
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[2]);
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[3]);
+    // 13 + 2 = 15
+    TEST_ASSERT_EQUAL_UINT32(15u, hal_fake_pio_insts[0].program.length);
+    // Instructions at offset 5, 6 are WAIT_0, WAIT_1 (after the 5-instruction
+    // repeat/delay/width setup block).
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[5]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[6]);
 }
 
 static void test_load_pulse_positive_inserts_three_waits(void) {
     emfi_pio_init();
     emfi_pio_params_t p = {.trigger = EMFI_TRIG_EXT_PULSE_POS, .delay_us = 1, .width_us = 5};
     TEST_ASSERT_TRUE(emfi_pio_load(&p));
-    TEST_ASSERT_EQUAL_UINT32(12u, hal_fake_pio_insts[0].program.length);
+    TEST_ASSERT_EQUAL_UINT32(16u, hal_fake_pio_insts[0].program.length);
     // PULSE_POS is `WAIT 0, WAIT 1, WAIT 0` (LOW→HIGH→LOW pulse).
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[2]);
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[3]);
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[4]);
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[5]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[6]);
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[7]);
 }
 
 static void test_load_pulse_negative_inserts_three_waits(void) {
     emfi_pio_init();
     emfi_pio_params_t p = {.trigger = EMFI_TRIG_EXT_PULSE_NEG, .delay_us = 1, .width_us = 5};
     TEST_ASSERT_TRUE(emfi_pio_load(&p));
-    TEST_ASSERT_EQUAL_UINT32(12u, hal_fake_pio_insts[0].program.length);
+    TEST_ASSERT_EQUAL_UINT32(16u, hal_fake_pio_insts[0].program.length);
     // PULSE_NEG is `WAIT 1, WAIT 0, WAIT 1` — inverse of PULSE_POS.
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[2]);
-    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[3]);
-    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[4]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[5]);
+    TEST_ASSERT_EQUAL_HEX16(0x2020, hal_fake_pio_insts[0].program.instructions[6]);
+    TEST_ASSERT_EQUAL_HEX16(0x20A0, hal_fake_pio_insts[0].program.instructions[7]);
 }
 
 static void test_load_attaches_emfi_pulse_to_pio(void) {
@@ -134,9 +135,11 @@ static void test_start_pushes_delay_then_width_ticks(void) {
     emfi_pio_params_t p = {.trigger = EMFI_TRIG_IMMEDIATE, .delay_us = 10, .width_us = 5};
     emfi_pio_load(&p);
     TEST_ASSERT_TRUE(emfi_pio_start());
-    TEST_ASSERT_EQUAL_UINT32(2u, hal_fake_pio_insts[0].sm[0].tx_count);
-    TEST_ASSERT_EQUAL_UINT32(10u * 125u, hal_fake_pio_insts[0].sm[0].tx_fifo[0]);
-    TEST_ASSERT_EQUAL_UINT32(5u * 125u, hal_fake_pio_insts[0].sm[0].tx_fifo[1]);
+    // FIFO order is [repeat-1, delay, width]; single pulse -> repeat-1 = 0.
+    TEST_ASSERT_EQUAL_UINT32(3u, hal_fake_pio_insts[0].sm[0].tx_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, hal_fake_pio_insts[0].sm[0].tx_fifo[0]);
+    TEST_ASSERT_EQUAL_UINT32(10u * 125u, hal_fake_pio_insts[0].sm[0].tx_fifo[1]);
+    TEST_ASSERT_EQUAL_UINT32(5u * 125u, hal_fake_pio_insts[0].sm[0].tx_fifo[2]);
     TEST_ASSERT_TRUE(hal_fake_pio_insts[0].sm[0].enabled);
 }
 
