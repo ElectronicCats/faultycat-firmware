@@ -528,13 +528,13 @@ static void scan_yield_progress(uint32_t cur, uint32_t total) {
     emfi_campaign_tick();
     crowbar_campaign_tick();
 
-    // Print progress every 100 iterations. The 0-th iteration always
+    // Print progress every 10 iterations. The 0-th iteration always
     // prints so the operator sees the scan started. Reset the
     // throttle counter at scan-start (cur=0) so a back-to-back
-    // `scan jtag` then `scan swd` doesn't race the 100-step throttle.
+    // `scan jtag` then `scan swd` doesn't race the 10-step throttle.
     if (cur == 0u)
         s_scan_last_progress_print = 0u;
-    if (cur == 0u || (cur - s_scan_last_progress_print) >= 100u) {
+    if (cur == 0u || (cur - s_scan_last_progress_print) >= 10u) {
         shell_printf("SCAN: progress %lu/%lu\n", (unsigned long)cur, (unsigned long)total);
         s_scan_last_progress_print = cur;
     }
